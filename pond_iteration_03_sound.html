@@ -1,0 +1,1418 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Voltage / Signal Instrument</title>
+<style>
+:root{color-scheme:dark;--bg:#0b1412;--panel:#111e1a;--line:#344942;--text:#e2eee7;--muted:#9db3a8;--lime:#c4e982;--cyan:#86c8bc;--orange:#edaa72;--red:#e5847d}
+*{box-sizing:border-box}html,body{margin:0;min-height:100%;background:var(--bg);color:var(--text);font:13px ui-monospace,SFMono-Regular,Menlo,monospace}
+body{background-image:linear-gradient(rgba(137,180,155,.035) 1px,transparent 1px),linear-gradient(90deg,rgba(137,180,155,.035) 1px,transparent 1px);background-size:32px 32px}
+button,select,input{font:inherit}button{border:1px solid var(--line);background:#1a2b25;color:var(--text);padding:9px 11px;cursor:pointer}button:hover{border-color:var(--lime);color:var(--lime)}button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--lime);outline-offset:2px}
+#sound-console{width:min(1440px,100%);margin:0 auto;padding:24px;position:relative;z-index:1}
+.topbar{display:flex;justify-content:space-between;align-items:center;gap:16px;padding-bottom:18px;border-bottom:1px solid var(--line)}
+.brand{font-size:14px;letter-spacing:.08em;color:var(--lime)}.subtitle{margin-top:6px;color:var(--muted);font-size:11px}
+.connection{display:flex;align-items:center;gap:10px}.status-dot{width:8px;height:8px;border-radius:50%;background:var(--red)}.status-dot.active{background:var(--lime);box-shadow:0 0 12px rgba(196,233,130,.5)}
+.layout{display:grid;grid-template-columns:minmax(0,1fr) 330px;gap:18px;padding-top:18px}.monitor,.controls{background:rgba(17,30,26,.94);border:1px solid var(--line)}
+.monitor{min-width:0;padding:18px}.section-head{display:flex;justify-content:space-between;align-items:center;gap:12px;color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.07em}
+.readouts{display:grid;grid-template-columns:minmax(0,1.5fr) repeat(3,minmax(85px,1fr));gap:1px;background:var(--line);border:1px solid var(--line);margin:16px 0}
+.readout{background:var(--panel);padding:14px;min-width:0}.readout-label{font-size:10px;color:var(--muted);text-transform:uppercase}.readout-value{margin-top:8px;font-size:22px;color:var(--text);white-space:nowrap}.readout.primary .readout-value{font-size:42px;line-height:1;color:var(--lime)}
+.trace-wrap{height:320px;border:1px solid var(--line);background:#0b1512}.trace-wrap canvas{display:block;width:100%;height:100%}
+.stream-footer{display:flex;justify-content:space-between;gap:12px;margin-top:10px;color:var(--muted);font-size:11px}.recent{margin-top:18px}.recent-list{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px;min-height:26px}.sample-chip{border:1px solid var(--line);padding:5px 7px;color:var(--cyan);font-size:11px}.sample-chip.spike{color:var(--orange);border-color:rgba(237,170,114,.55)}
+.controls{padding:16px}.controls h2{margin:0 0 12px;font-size:12px;letter-spacing:.07em;font-weight:500;color:var(--lime)}.control-group{padding:14px 0;border-top:1px solid var(--line)}.control-group:first-of-type{border-top:0;padding-top:0}.control-label{display:flex;justify-content:space-between;gap:12px;margin-bottom:7px;color:var(--muted);font-size:11px}.control-value{color:var(--text)}.controls input[type=range]{width:100%;accent-color:var(--lime)}.controls select{width:100%;padding:8px;background:#1a2b25;color:var(--text);border:1px solid var(--line)}
+.button-row{display:flex;gap:8px}.button-row button{flex:1}.primary-button{border-color:var(--lime);color:var(--lime)}.audio-status{min-height:30px;margin-top:9px;color:var(--muted);font-size:11px;line-height:1.45}.map-note{margin-top:8px;color:var(--muted);font-size:10px;line-height:1.5}
+@media(max-width:900px){#sound-console{padding:16px}.layout{grid-template-columns:minmax(0,1fr) 290px;gap:12px}.monitor{padding:12px}.controls{padding:12px}.readout{padding:10px}.readout.primary .readout-value{font-size:34px}}
+@media(max-width:680px){#sound-console{padding:12px}.topbar{align-items:flex-start;flex-direction:column}.connection{width:100%;justify-content:space-between}.layout{grid-template-columns:1fr}.readouts{grid-template-columns:repeat(3,minmax(0,1fr))}.readout.primary{grid-column:1/-1}.readout.primary .readout-value{font-size:40px}.trace-wrap{height:240px}.controls{order:-1}}
+</style></head><body><canvas aria-label="Live serial voltage trace"></canvas>
+<script>
+let width=0, height=0, drawingContext=null, deltaTime=16.667, frameCount=0;
+let windowWidth=window.innerWidth, windowHeight=window.innerHeight;
+let key='', keyCode=0;
+const activeKeys = new Set();
+function createCanvas(w,h){
+ const canvas=document.querySelector('canvas');
+ canvas.width=width=w; canvas.height=height=h;
+ drawingContext=canvas.getContext('2d');
+ return canvas;
+}
+function resizeCanvas(w,h){
+ const canvas=document.querySelector('canvas');
+ canvas.width=width=w; canvas.height=height=h;
+}
+function pixelDensity(n){}
+function keyIsDown(code){ return activeKeys.has(code); }
+window.addEventListener('keydown',e=>{
+ activeKeys.add(e.keyCode); key=e.key; keyCode=e.keyCode;
+ if(!e.repeat && typeof keyPressed==='function') keyPressed();
+ if ([37,38,39,40,32].includes(e.keyCode)) e.preventDefault();
+});
+window.addEventListener('keyup',e=>activeKeys.delete(e.keyCode));
+window.addEventListener('blur',()=>activeKeys.clear());
+window.addEventListener('resize',()=>{
+ windowWidth=innerWidth; windowHeight=innerHeight;
+ if(typeof windowResized==='function') windowResized();
+});
+</script>
+<script>
+// POND / Iteration 03: Spatial image zones + background crossfades
+// Paste everything into https://editor.p5js.org/ (sketch.js)
+// Controls: left/right rotate, up/down move relative to facing, Q = rise, E = sink, Shift = faster.
+// F = toggle fog, [ ] = visibility; T = scramble, N = sediment layer.
+// U = upload images, I = toggle images, H = HUD, G = grid, R = reset.
+// Uploaded images stay anchored in pond space and grow with perspective.
+// Optional WebXR AR tracking maps real phone movement into the pond volume.
+
+const POND = { width: 200, length: 500, depth: 100 };
+const NEAR = 14;
+const ROTATION_SPEED = 0.035;
+const FAR = 320;
+let fogEnabled = true;
+let fogDistance = 145;
+const MIN_FOG = 70;
+const SEDIMENT_START = 90;
+const GLYPHS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789#@%&?*+=/\\<>[]{}:_~';
+let scrambleEnabled = true;
+let sedimentEnabled = true;
+let imagesEnabled = true;
+let visibleSediment = 0;
+let visibleDeepParticles = 0;
+let visibleParticles = 0;
+let visibleFragments = 0;
+let fpsEstimate = 60;
+let sensorMillivolts = 0;
+let stirLevel = 0;
+let sensorPort = null;
+let sensorReader = null;
+let connectionDot = null;
+let audioModeControl = null;
+let beatDivisionControl = null;
+let noteDurationControl = null;
+let sensorHistory = [];
+let sampleCount = 0;
+let spikeCount = 0;
+let latestToneFrequency = 0;
+let previousSensorReading = null;
+let lastToneAt = 0;
+let audioContext = null;
+let audioMasterGain = null;
+let voiceOscillator = null;
+let voiceGain = null;
+let audioEnabled = false;
+let audioButton = null;
+let audioStatus = null;
+let waveformControl = null;
+let volumeControl = null;
+let triggerFloorControl = null;
+let spikeThresholdControl = null;
+let signalCenterControl = null;
+let signalSpanControl = null;
+let traceRangeDisplay = null;
+let pitchLowControl = null;
+let pitchHighControl = null;
+
+function renderLimit() { return fogEnabled ? fogDistance : FAR; }
+
+const PROMPTS = [
+  'What is growing\nbeneath this surface?',
+  'Where does the structure\nbecome an environment?',
+  'What moves too slowly\nto be noticed?',
+  'What holds this place\ntogether?',
+  'Look towards the\noverlooked edge.',
+  'Who maintains\nthis boundary?',
+  'Which traces belong\nto more than one life?',
+  'Where might the\nwater have travelled?',
+  'What gathers in\nthe spaces between?',
+  'Can a surface\nremember contact?',
+  'What forms of attention\ndoes this place invite?',
+  'What remains hidden\nin plain sight?',
+  'How does time\naccumulate here?',
+  'What is the smallest\nchange you can detect?',
+  'Where does decay\nbecome material?',
+  'Which relationships\nare easily overlooked?',
+  'Where does one\nsystem become another?',
+  'What can be sensed\nwithout being seen?',
+  'How is this place\nbeing remade?',
+  'What lives alongside\nthe infrastructure?',
+  'Who or what passes\nthrough this site?',
+  'What is carried\nby the surface?',
+  'Where does the\nsediment settle?',
+  'What might interrupt\nthis arrangement?',
+  'Which materials\nare in motion?',
+  'How does the site\nshape your attention?',
+  'What has been\nleft undisturbed?',
+  'What might emerge\nif you wait?'
+];
+
+let viewer = { x: 100, y: 64, z: 10, yaw: 0, vx: 0, vy: 0, vz: 0 };
+let fragments = [];
+let sedimentFragments = [];
+let particles = [];
+let showHUD = true;
+let showGrid = false;
+let random01;
+
+let uploadedImages = [];
+let imageZones = [];
+let uploadPanel = null;
+let uploadInput = null;
+let uploadStatus = null;
+let activeImageIndex = -1;
+let currentImageStrength = 0;
+let imageBlendWeights = [];
+let imageState = {
+  currentName: 'none',
+  nextName: 'none'
+};
+
+function setup() {
+  createCanvas(windowWidth, Math.max(220, Math.min(360, windowHeight * 0.48)));
+  pixelDensity(1);
+  createSoundDashboard();
+}
+
+function createSoundDashboard() {
+  const app = document.createElement('main');
+  app.id = 'sound-console';
+  app.innerHTML = `
+    <header class="topbar">
+      <div><div class="brand">VOLTAGE / SIGNAL INSTRUMENT</div><div class="subtitle">Serial input mapped to live tones and beats</div></div>
+      <div class="connection"><span class="status-dot" id="connection-dot"></span><span id="serial-status">Disconnected - 0 mV</span><button id="serial-connect" class="primary-button">Connect serial</button></div>
+    </header>
+    <div class="layout">
+      <section class="monitor">
+        <div class="section-head"><span>Incoming signal</span><span id="sample-rate">Waiting for samples</span></div>
+        <div class="readouts">
+          <div class="readout primary"><div class="readout-label">Live voltage</div><div class="readout-value"><span id="live-value">0</span> <small>mV</small></div></div>
+          <div class="readout"><div class="readout-label">Change</div><div class="readout-value" id="delta-value">-- mV</div></div>
+          <div class="readout"><div class="readout-label">Samples</div><div class="readout-value" id="sample-count">0</div></div>
+          <div class="readout"><div class="readout-label">Spikes</div><div class="readout-value" id="spike-count">0</div></div>
+        </div>
+        <div class="trace-wrap"></div>
+        <div class="stream-footer"><span id="trace-range">0 to 400 mV</span><span>9600 baud / newline-delimited</span><span id="latest-tone">No tone yet</span></div>
+      </section>
+      <aside class="controls">
+        <h2>SIGNAL WINDOW</h2>
+        <div class="control-group" id="signal-ranges"></div>
+        <h2>OUTPUT CONTROLS</h2>
+        <div class="control-group"><div class="button-row"><button id="audio-enable" class="primary-button">Enable audio</button><button id="test-tone">Test tone</button></div><div id="audio-status" class="audio-status">Audio is off. Enable it to hear incoming events.</div></div>
+        <div class="control-group"><label class="control-label" for="audio-mode"><span>Mapping</span></label><select id="audio-mode"><option value="spike">Spike notes</option><option value="pulse">Pulse beat</option><option value="track">Voltage pitch</option></select></div>
+        <div class="control-group"><label class="control-label" for="waveform"><span>Waveform</span></label><select id="waveform"><option value="sine">Sine</option><option value="triangle">Triangle</option><option value="square">Square</option><option value="sawtooth">Sawtooth</option></select></div>
+        <div class="control-group" id="audio-ranges"></div>
+        <div class="control-group"><label class="control-label" for="beat-division"><span>Beat division</span></label><select id="beat-division"><option value="1">Every event</option><option value="2">Every 2nd event</option><option value="4">Every 4th event</option></select><div class="map-note">Pulse mode follows each incoming sample above the trigger floor. Spike mode responds only to rising changes.</div></div>
+      </aside>
+    </div>`;
+  document.body.appendChild(app);
+    const canvas = createCanvas(windowWidth, Math.max(220, Math.min(360, windowHeight * 0.48)));
+  canvas.id = 'signal-trace';
+  canvas.setAttribute('aria-label', 'Live plot of incoming voltage in millivolts');
+  app.querySelector('.trace-wrap').appendChild(canvas);
+    resizeCanvas(canvas.clientWidth, canvas.clientHeight);
+
+  sensorButton = app.querySelector('#serial-connect');
+  sensorStatus = app.querySelector('#serial-status');
+  connectionDot = app.querySelector('#connection-dot');
+  liveValueDisplay = app.querySelector('#live-value');
+  deltaDisplay = app.querySelector('#delta-value');
+  sampleCountDisplay = app.querySelector('#sample-count');
+  spikeCountDisplay = app.querySelector('#spike-count');
+  latestToneDisplay = app.querySelector('#latest-tone');
+  sampleRateDisplay = app.querySelector('#sample-rate');
+  traceRangeDisplay = app.querySelector('#trace-range');
+  audioButton = app.querySelector('#audio-enable');
+  audioStatus = app.querySelector('#audio-status');
+  waveformControl = app.querySelector('#waveform');
+  audioModeControl = app.querySelector('#audio-mode');
+  beatDivisionControl = app.querySelector('#beat-division');
+  sensorButton.onclick = toggleSensorConnection;
+  audioButton.onclick = toggleAudio;
+  app.querySelector('#test-tone').onclick = playTestTone;
+  audioModeControl.addEventListener('change', stopVoltageVoice);
+
+  const rangePanel = app.querySelector('#audio-ranges');
+  const signalRangePanel = app.querySelector('#signal-ranges');
+  signalCenterControl = createAudioRange('Signal center', 0, 400, 1, 325, value => `${Math.round(value)} mV`, updateSignalRange);
+  signalSpanControl = createAudioRange('Signal span', 5, 200, 5, 50, value => `${Math.round(value)} mV`, updateSignalRange);
+  signalRangePanel.appendChild(signalCenterControl.row);
+  signalRangePanel.appendChild(signalSpanControl.row);
+  volumeControl = createAudioRange('Volume', 0, 0.35, 0.01, 0.12, value => `${Math.round(value * 100)}%`, updateAudioVolume);
+  triggerFloorControl = createAudioRange('Trigger floor', 0, 400, 5, 250, value => `${Math.round(value)} mV`, null);
+  spikeThresholdControl = createAudioRange('Rise threshold', 1, 100, 1, 18, value => `${Math.round(value)} mV`, null);
+  pitchLowControl = createAudioRange('Low pitch', 80, 440, 5, 180, value => `${Math.round(value)} Hz`, null);
+  pitchHighControl = createAudioRange('High pitch', 400, 1760, 10, 880, value => `${Math.round(value)} Hz`, null);
+  noteDurationControl = createAudioRange('Note length', 0.04, 0.5, 0.01, 0.14, value => `${Math.round(value * 1000)} ms`, null);
+  for (const control of [volumeControl, triggerFloorControl, spikeThresholdControl, pitchLowControl, pitchHighControl, noteDurationControl]) {
+    rangePanel.appendChild(control.row);
+  }
+  updateSignalRange();
+}
+
+function positionSensorColumnInFront() {
+  const distance = 48;
+  sensorColumn.x = clamp(viewer.x + Math.sin(viewer.yaw) * distance, 4, 196);
+  sensorColumn.z = clamp(viewer.z + Math.cos(viewer.yaw) * distance, 16, 492);
+}
+
+function initialisePond() {
+  const anchors = [
+    { x: 100, y: 61, z: 106 },
+    { x: 76, y: 80, z: 161 },
+    { x: 132, y: 49, z: 203 },
+    { x: 97, y: 90, z: 248 },
+    { x: 126, y: 73, z: 310 },
+    { x: 74, y: 58, z: 383 }
+  ];
+  fragments = PROMPTS.map((content, i) => {
+    const position = i < anchors.length ? anchors[i] : {
+      x: 15 + random01() * 170,
+      y: 34 + Math.pow(random01(), 0.6) * 63,
+      z: 32 + random01() * 446
+    };
+      return { ...position, ...createFlowState(), lines: content.split('\n'), id: i };
+  });
+
+  for (let i = 0; i < 42; i++) {
+    fragments.push({
+      x: 7 + random01() * 186,
+      y: SEDIMENT_START + random01() * 9.8,
+      z: 15 + random01() * 468,
+      ...createFlowState(),
+      lines: PROMPTS[Math.floor(random01() * PROMPTS.length)].split('\n'),
+      id: PROMPTS.length + i
+    });
+  }
+
+  const sourceLines = PROMPTS.map(s => s.replace(/\n/g, ' ').split(' '));
+  sedimentFragments = [];
+  for (let i = 0; i < 230; i++) {
+    const words = sourceLines[Math.floor(random01() * sourceLines.length)];
+    const index = Math.floor(random01() * words.length);
+    const count = 1 + Math.floor(random01() * 5);
+    const phrase = words.slice(index, index + count).join(' ');
+    sedimentFragments.push({
+      x: 4 + random01() * 192,
+      y: SEDIMENT_START + Math.pow(random01(), 0.8) * 9.8,
+      z: 9 + random01() * 481,
+      ...createFlowState(),
+      line: phrase,
+      id: i + 2000,
+      tone: random01(),
+      phase: random01() * 6.28318
+    });
+  }
+
+  const alphabet = '._-:;+/\\|*?()[]{}~abcdefghijklmnopqrstuvwxyz';
+  particles = [];
+  for (let i = 0; i < 230; i++) particles.push(makeParticle(i, false, alphabet));
+  for (let i = 0; i < 1150; i++) particles.push(makeParticle(i + 230, true, alphabet));
+}
+
+function createFlowState() {
+  return { vx: 0, vy: 0, vz: 0, flowPhase: random01() * 6.28318 };
+}
+
+function makeParticle(id, sediment, alphabet) {
+  return {
+    x: random01() * POND.width,
+    y: sediment ? SEDIMENT_START + random01() * 9.8 : 15 + random01() * 85,
+    z: random01() * POND.length,
+    vx: (random01() - 0.5) * (sediment ? 0.10 : 0.20),
+    vy: (random01() - 0.5) * (sediment ? 0.035 : 0.10),
+    vz: (random01() - 0.5) * (sediment ? 0.10 : 0.20),
+    char: alphabet[Math.floor(random01() * alphabet.length)],
+    bright: random01(),
+    sediment,
+    dart: 0,
+    id
+  };
+}
+
+function createUploadUI() {
+  uploadPanel = document.createElement('div');
+  uploadPanel.style.position = 'fixed';
+  uploadPanel.style.top = '18px';
+  uploadPanel.style.right = '18px';
+  uploadPanel.style.zIndex = '10';
+  uploadPanel.style.padding = '10px 12px';
+  uploadPanel.style.background = 'rgba(3, 11, 11, 0.64)';
+  uploadPanel.style.border = '1px solid rgba(172,208,191,0.25)';
+  uploadPanel.style.backdropFilter = 'blur(5px)';
+  uploadPanel.style.font = '11px monospace';
+  uploadPanel.style.color = 'rgba(198,225,214,0.82)';
+  uploadPanel.style.maxWidth = '280px';
+  uploadPanel.style.maxHeight = 'calc(100vh - 36px)';
+  uploadPanel.style.overflowY = 'auto';
+  uploadPanel.style.lineHeight = '1.35';
+
+  const label = document.createElement('div');
+  label.textContent = 'POND / SENSOR TONES';
+  label.style.marginBottom = '6px';
+  label.style.letterSpacing = '0.06em';
+  label.style.color = 'rgba(216,236,228,0.92)';
+
+  const button = document.createElement('button');
+  button.textContent = 'Upload images';
+  button.style.font = '11px monospace';
+  button.style.padding = '6px 9px';
+  button.style.background = 'rgba(20, 43, 39, 0.94)';
+  button.style.color = 'rgba(216,236,228,0.92)';
+  button.style.border = '1px solid rgba(172,208,191,0.35)';
+  button.style.cursor = 'pointer';
+  button.style.marginRight = '8px';
+  button.onclick = () => uploadInput && uploadInput.click();
+
+  const clearButton = document.createElement('button');
+  clearButton.textContent = 'Clear';
+  clearButton.style.font = '11px monospace';
+  clearButton.style.padding = '6px 9px';
+  clearButton.style.background = 'rgba(20, 43, 39, 0.68)';
+  clearButton.style.color = 'rgba(216,236,228,0.92)';
+  clearButton.style.border = '1px solid rgba(172,208,191,0.28)';
+  clearButton.style.cursor = 'pointer';
+  clearButton.onclick = clearUploadedImages;
+
+  const sensorLabel = document.createElement('div');
+  sensorLabel.textContent = 'ARDUINO SENSOR';
+  sensorLabel.style.marginTop = '12px';
+  sensorLabel.style.marginBottom = '6px';
+  sensorLabel.style.color = 'rgba(216,236,228,0.92)';
+
+  sensorButton = document.createElement('button');
+  sensorButton.textContent = 'Connect sensor';
+  sensorButton.style.font = '11px monospace';
+  sensorButton.style.padding = '6px 9px';
+  sensorButton.style.background = 'rgba(20, 43, 39, 0.94)';
+  sensorButton.style.color = 'rgba(216,236,228,0.92)';
+  sensorButton.style.border = '1px solid rgba(172,208,191,0.35)';
+  sensorButton.style.cursor = 'pointer';
+  sensorButton.onclick = toggleSensorConnection;
+
+  sensorStatus = document.createElement('div');
+  sensorStatus.style.marginTop = '7px';
+  sensorStatus.style.color = 'rgba(178,205,193,0.76)';
+  sensorStatus.textContent = 'Disconnected - 0 mV - no stirring';
+
+  const sensorHint = document.createElement('div');
+  sensorHint.style.marginTop = '5px';
+  sensorHint.style.color = 'rgba(140,177,164,0.68)';
+  sensorHint.textContent = 'Serial: 9600 baud, one mV number per line.';
+
+  const audioLabel = document.createElement('div');
+  audioLabel.textContent = 'AUDIO';
+  audioLabel.style.marginTop = '12px';
+  audioLabel.style.marginBottom = '6px';
+  audioLabel.style.paddingTop = '8px';
+  audioLabel.style.borderTop = '1px solid rgba(172,208,191,0.2)';
+  audioLabel.style.color = 'rgba(216,236,228,0.92)';
+
+  audioButton = document.createElement('button');
+  audioButton.textContent = 'Enable audio';
+  styleAudioButton(audioButton);
+  audioButton.style.marginRight = '6px';
+  audioButton.onclick = toggleAudio;
+
+  const testToneButton = document.createElement('button');
+  testToneButton.textContent = 'Test tone';
+  styleAudioButton(testToneButton);
+  testToneButton.onclick = playTestTone;
+
+  waveformControl = document.createElement('select');
+  for (const waveform of ['sine', 'triangle', 'square', 'sawtooth']) {
+    const option = document.createElement('option');
+    option.value = waveform;
+    option.textContent = waveform;
+    waveformControl.appendChild(option);
+  }
+  waveformControl.value = 'sine';
+  waveformControl.style.cssText = 'font:11px monospace;color:#d8ece4;background:#142b27;border:1px solid rgba(172,208,191,0.35);padding:4px;width:100%;margin:4px 0 2px';
+
+  volumeControl = createAudioRange('Volume', 0, 0.35, 0.01, 0.12, value => `${Math.round(value * 100)}%`, updateAudioVolume);
+  triggerFloorControl = createAudioRange('Trigger floor', 0, 400, 5, 250, value => `${Math.round(value)} mV`, null);
+  spikeThresholdControl = createAudioRange('Spike threshold', 1, 100, 1, 18, value => `${Math.round(value)} mV`, null);
+  pitchLowControl = createAudioRange('Low pitch', 80, 440, 5, 180, value => `${Math.round(value)} Hz`, null);
+  pitchHighControl = createAudioRange('High pitch', 400, 1760, 10, 880, value => `${Math.round(value)} Hz`, null);
+
+  audioStatus = document.createElement('div');
+  audioStatus.style.marginTop = '6px';
+  audioStatus.style.color = 'rgba(178,205,193,0.76)';
+  audioStatus.textContent = 'Audio off - enable to hear voltage spikes.';
+
+  uploadInput = document.createElement('input');
+  uploadInput.type = 'file';
+  uploadInput.accept = 'image/*';
+  uploadInput.multiple = true;
+  uploadInput.style.display = 'none';
+  uploadInput.addEventListener('change', (event) => loadSelectedImages(event.target.files));
+
+  uploadStatus = document.createElement('div');
+  uploadStatus.style.marginTop = '8px';
+  uploadStatus.style.color = 'rgba(178,205,193,0.76)';
+  uploadStatus.textContent = 'No images loaded. U opens the upload dialog.';
+
+  const hint = document.createElement('div');
+  hint.style.marginTop = '6px';
+  hint.style.color = 'rgba(140,177,164,0.68)';
+  hint.textContent = 'Images stay anchored in their pond zones.';
+
+  uploadPanel.appendChild(label);
+  uploadPanel.appendChild(button);
+  uploadPanel.appendChild(clearButton);
+  uploadPanel.appendChild(uploadInput);
+  uploadPanel.appendChild(uploadStatus);
+  uploadPanel.appendChild(hint);
+  uploadPanel.appendChild(sensorLabel);
+  uploadPanel.appendChild(sensorButton);
+  uploadPanel.appendChild(sensorStatus);
+  uploadPanel.appendChild(sensorHint);
+  uploadPanel.appendChild(audioLabel);
+  uploadPanel.appendChild(audioButton);
+  uploadPanel.appendChild(testToneButton);
+  uploadPanel.appendChild(waveformControl);
+  uploadPanel.appendChild(volumeControl.row);
+  uploadPanel.appendChild(triggerFloorControl.row);
+  uploadPanel.appendChild(spikeThresholdControl.row);
+  uploadPanel.appendChild(pitchLowControl.row);
+  uploadPanel.appendChild(pitchHighControl.row);
+  uploadPanel.appendChild(audioStatus);
+  document.body.appendChild(uploadPanel);
+}
+
+function styleAudioButton(button) {
+  button.style.font = '11px monospace';
+  button.style.padding = '6px 9px';
+  button.style.background = 'rgba(20, 43, 39, 0.94)';
+  button.style.color = 'rgba(216,236,228,0.92)';
+  button.style.border = '1px solid rgba(172,208,191,0.35)';
+  button.style.cursor = 'pointer';
+}
+
+function createAudioRange(label, min, max, step, initial, format, onInput) {
+  const row = document.createElement('label');
+  row.style.display = 'block';
+  row.style.marginTop = '7px';
+  const heading = document.createElement('div');
+  heading.style.display = 'flex';
+  heading.style.justifyContent = 'space-between';
+  const name = document.createElement('span');
+  name.textContent = label;
+  const value = document.createElement('span');
+  value.textContent = format(initial);
+  heading.appendChild(name);
+  heading.appendChild(value);
+  const input = document.createElement('input');
+  input.type = 'range';
+  input.min = String(min);
+  input.max = String(max);
+  input.step = String(step);
+  input.value = String(initial);
+  input.style.width = '100%';
+  input.style.margin = '3px 0 0';
+  input.addEventListener('input', () => {
+    const number = Number(input.value);
+    value.textContent = format(number);
+    if (onInput) onInput(number);
+  });
+  row.appendChild(heading);
+  row.appendChild(input);
+  input.row = row;
+  return input;
+}
+
+async function toggleAudio() {
+  if (audioEnabled) {
+    await audioContext.suspend();
+    audioEnabled = false;
+    audioButton.textContent = 'Enable audio';
+    audioStatus.textContent = 'Audio off.';
+    return;
+  }
+  if (!window.AudioContext && !window.webkitAudioContext) {
+    audioStatus.textContent = 'Web Audio is not available in this browser.';
+    return;
+  }
+  audioContext = audioContext || new (window.AudioContext || window.webkitAudioContext)();
+  if (!audioMasterGain) {
+    audioMasterGain = audioContext.createGain();
+    audioMasterGain.gain.value = Number(volumeControl.value);
+    audioMasterGain.connect(audioContext.destination);
+  }
+  await audioContext.resume();
+  audioEnabled = true;
+  audioButton.textContent = 'Mute audio';
+  audioStatus.textContent = 'Audio on - waiting for a voltage spike.';
+}
+
+function updateAudioVolume(value) {
+  if (audioMasterGain && audioContext) {
+    audioMasterGain.gain.setTargetAtTime(value, audioContext.currentTime, 0.025);
+  }
+}
+
+function updateSignalRange() {
+  const center = Number(signalCenterControl.value);
+  const span = Number(signalSpanControl.value);
+  const low = center - span * 0.5;
+  const high = center + span * 0.5;
+  traceRangeDisplay.textContent = `${Math.round(low)}-${Math.round(high)} mV / ${Math.round(span)} mV span`;
+  if (drawingContext) draw();
+}
+
+function mapVoltageToPitch(reading) {
+  const low = Number(pitchLowControl.value);
+  const high = Math.max(low, Number(pitchHighControl.value));
+  const center = Number(signalCenterControl.value);
+  const span = Math.max(1, Number(signalSpanControl.value));
+  const position = clamp((reading - (center - span * 0.5)) / span, 0, 1);
+  return low * Math.pow(high / low, position);
+}
+
+function startVoltageVoice(frequency) {
+  if (!audioEnabled || !audioContext || !audioMasterGain) return;
+  if (!voiceOscillator) {
+    voiceOscillator = audioContext.createOscillator();
+    voiceGain = audioContext.createGain();
+    voiceOscillator.type = waveformControl.value;
+    voiceGain.gain.value = 0.0001;
+    voiceOscillator.connect(voiceGain);
+    voiceGain.connect(audioMasterGain);
+    voiceOscillator.start();
+  }
+  const now = audioContext.currentTime;
+  voiceOscillator.type = waveformControl.value;
+  voiceOscillator.frequency.setTargetAtTime(frequency, now, 0.04);
+  voiceGain.gain.setTargetAtTime(0.42, now, 0.04);
+  latestToneFrequency = frequency;
+  latestToneDisplay.textContent = `${Math.round(frequency)} Hz / tracking`;
+}
+
+function stopVoltageVoice() {
+  if (!voiceOscillator || !audioContext) return;
+  const oscillator = voiceOscillator;
+  const gain = voiceGain;
+  voiceOscillator = null;
+  voiceGain = null;
+  const now = audioContext.currentTime;
+  gain.gain.cancelScheduledValues(now);
+  gain.gain.setTargetAtTime(0.0001, now, 0.025);
+  oscillator.stop(now + 0.12);
+}
+
+function playMappedTone(frequency) {
+  if (!audioEnabled) {
+    audioStatus.textContent = 'Signal event detected - enable audio to hear it.';
+    return;
+  }
+  stopVoltageVoice();
+  playTone(frequency, Number(noteDurationControl.value));
+  lastToneAt = Date.now();
+  latestToneFrequency = frequency;
+  latestToneDisplay.textContent = `${Math.round(frequency)} Hz`;
+  audioStatus.textContent = `Input event - ${Math.round(frequency)} Hz.`;
+}
+
+function playTone(frequency, duration = 0.22) {
+  if (!audioEnabled || !audioContext || !audioMasterGain) return;
+  const now = audioContext.currentTime;
+  const oscillator = audioContext.createOscillator();
+  const envelope = audioContext.createGain();
+  oscillator.type = waveformControl.value;
+  oscillator.frequency.setValueAtTime(frequency, now);
+  envelope.gain.setValueAtTime(0.0001, now);
+  envelope.gain.exponentialRampToValueAtTime(0.8, now + 0.015);
+  envelope.gain.exponentialRampToValueAtTime(0.0001, now + duration);
+  oscillator.connect(envelope);
+  envelope.connect(audioMasterGain);
+  oscillator.start(now);
+  oscillator.stop(now + duration + 0.02);
+}
+
+async function playTestTone() {
+  if (!audioEnabled) await toggleAudio();
+  if (!audioEnabled) return;
+  const frequency = mapVoltageToPitch(Number(signalCenterControl.value));
+  playTone(frequency, 0.35);
+  latestToneFrequency = frequency;
+  latestToneDisplay.textContent = `${Math.round(frequency)} Hz / test`;
+  audioStatus.textContent = `Test tone - ${Math.round(frequency)} Hz.`;
+}
+
+function handleSensorReading(reading) {
+  const now = Date.now();
+  const previous = previousSensorReading;
+  const change = previous === null ? 0 : reading - previous;
+  sensorMillivolts = reading;
+  sensorLastReadingAt = now;
+  dataTimedOut = false;
+  connectionDot.classList.add('active');
+  sensorStatus.textContent = `Connected - ${Math.round(reading)} mV`;
+  sampleCount++;
+  const sampleTime = performance.now();
+  sensorHistory.push({ value: reading, change, time: sampleTime });
+  if (sensorHistory.length > 300) sensorHistory.shift();
+  liveValueDisplay.textContent = String(Math.round(reading));
+  deltaDisplay.textContent = previous === null ? '-- mV' : `${change > 0 ? '+' : ''}${Math.round(change)} mV`;
+  sampleCountDisplay.textContent = String(sampleCount);
+  if (sensorHistory.length > 1) {
+    const recent = sensorHistory.slice(-16);
+    const elapsed = recent[recent.length - 1].time - recent[0].time;
+    sampleRateDisplay.textContent = elapsed > 0 ? `${((recent.length - 1) * 1000 / elapsed).toFixed(1)} samples/s` : 'Measuring rate';
+  }
+
+  const isSpike = previous !== null && reading >= Number(triggerFloorControl.value) &&
+    change >= Number(spikeThresholdControl.value);
+  if (isSpike) {
+    spikeCount++;
+    spikeCountDisplay.textContent = String(spikeCount);
+  }
+  const division = Number(beatDivisionControl.value);
+  const mode = audioModeControl.value;
+  if (mode === 'spike' && isSpike && spikeCount % division === 0) {
+    playMappedTone(mapVoltageToPitch(reading));
+  } else if (mode === 'pulse' && reading >= Number(triggerFloorControl.value) && sampleCount % division === 0 && now - lastToneAt >= 100) {
+    playMappedTone(mapVoltageToPitch(reading));
+  } else if (mode === 'track' && reading >= Number(triggerFloorControl.value)) {
+    startVoltageVoice(mapVoltageToPitch(reading));
+  } else {
+    stopVoltageVoice();
+  }
+
+  if (reading <= 0) {
+    previousSensorReading = null;
+    stopVoltageVoice();
+  } else {
+    previousSensorReading = reading;
+  }
+}
+
+async function toggleSensorConnection() {
+  if (sensorPort) {
+    if (sensorReader) await sensorReader.cancel();
+    return;
+  }
+  if (!navigator.serial) {
+    sensorStatus.textContent = 'Web Serial unavailable - use Chrome or Edge on localhost.';
+    return;
+  }
+  try {
+    sensorStatus.textContent = 'Choose the Arduino serial port...';
+    sensorPort = await navigator.serial.requestPort();
+    await sensorPort.open({ baudRate: 9600 });
+    sensorConnected = true;
+    dataTimedOut = false;
+    connectionDot.classList.add('active');
+    sensorButton.textContent = 'Disconnect sensor';
+    sensorStatus.textContent = 'Connected - no serial data yet';
+    sensorLastReadingAt = Date.now();
+    sensorWatchdog = setInterval(() => {
+      if (sensorConnected && !dataTimedOut && Date.now() - sensorLastReadingAt > 1000) {
+        showNoData('No data for 1s - output set to 0 mV');
+      }
+    }, 250);
+    const reader = sensorPort.readable.getReader();
+    sensorReader = reader;
+    const decoder = new TextDecoder();
+    let pending = '';
+    let receivedBytes = 0;
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      receivedBytes += value.byteLength;
+      pending += decoder.decode(value, { stream: true });
+      const lines = pending.split(/\r?\n/);
+      pending = lines.pop();
+      if (pending.length > 256) pending = pending.slice(-256);
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        const reading = parseSensorMillivolts(line);
+        if (reading === null) {
+          const raw = line.replace(/[^\x20-\x7E]/g, '?').slice(0, 28);
+          sensorStatus.textContent = `RX ${receivedBytes} bytes - unparsed: ${raw}`;
+          continue;
+        }
+        handleSensorReading(reading);
+      }
+      if (pending && !lines.some(line => line.trim())) {
+        const raw = pending.replace(/[^\x20-\x7E]/g, '?').slice(-28);
+        sensorStatus.textContent = `RX ${receivedBytes} bytes - partial: ${raw}`;
+      }
+    }
+  } catch (error) {
+    connectionDot.classList.remove('active');
+    sensorStatus.textContent = error.message.includes('Failed to open serial port')
+      ? 'Could not open port - close Serial Monitor/Plotter and retry.'
+      : `Serial connection ended: ${error.message}`;
+  } finally {
+    const wasConnected = sensorConnected;
+    if (sensorWatchdog) clearInterval(sensorWatchdog);
+    sensorWatchdog = null;
+    if (sensorReader) sensorReader.releaseLock();
+    sensorReader = null;
+    if (sensorPort) {
+      try { await sensorPort.close(); } catch (error) {}
+    }
+    sensorPort = null;
+    sensorConnected = false;
+    sensorButton.textContent = 'Connect serial';
+    if (wasConnected) showNoData('Disconnected - 0 mV');
+    else connectionDot.classList.remove('active');
+  }
+}
+
+function parseSensorMillivolts(line) {
+  const match = line.trim().match(/-?\d+(?:\.\d+)?/);
+  if (!match) return null;
+  const hasVolts = /\bV\b/i.test(line) && !/mV/i.test(line);
+  const reading = Number(match[0]) * (hasVolts ? 1000 : 1);
+  return Number.isFinite(reading) ? clamp(reading, 0, 400) : null;
+}
+
+function loadSelectedImages(fileList) {
+  const files = Array.from(fileList || []).filter(file => file.type && file.type.startsWith('image/'));
+  if (!files.length) return;
+  clearUploadedImages(false);
+  uploadStatus.textContent = `Loading ${files.length} image${files.length === 1 ? '' : 's'}...`;
+  let loaded = 0;
+  files.forEach((file, index) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      uploadedImages[index] = { img, name: file.name };
+      URL.revokeObjectURL(url);
+      loaded++;
+      if (loaded === files.length) {
+        uploadedImages = uploadedImages.filter(Boolean);
+        distributeImageZones();
+        imagesEnabled = uploadedImages.length > 0;
+        updateUploadStatus();
+      }
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      loaded++;
+      if (loaded === files.length) {
+        uploadedImages = uploadedImages.filter(Boolean);
+        distributeImageZones();
+        imagesEnabled = uploadedImages.length > 0;
+        updateUploadStatus();
+      }
+    };
+    img.src = url;
+  });
+  if (uploadInput) uploadInput.value = '';
+}
+
+function clearUploadedImages(updateStatus = true) {
+  uploadedImages = [];
+  imageZones = [];
+  activeImageIndex = -1;
+  imageBlendWeights = [];
+  currentImageStrength = 0;
+  imageState.currentName = 'none';
+  imageState.nextName = 'none';
+  if (updateStatus) updateUploadStatus();
+}
+
+function updateUploadStatus() {
+  if (!uploadStatus) return;
+  if (!uploadedImages.length) {
+    uploadStatus.textContent = 'No images loaded. U opens the upload dialog.';
+    return;
+  }
+  const zoneText = imageZones.length === 1 ? '1 image zone' : `${imageZones.length} image zones`;
+  uploadStatus.textContent = `${uploadedImages.length} image${uploadedImages.length === 1 ? '' : 's'} loaded. ${zoneText}.`;
+}
+
+function distributeImageZones() {
+  imageZones = [];
+  const n = uploadedImages.length;
+  if (!n) return;
+  const yBands = [24, 52, 82];
+  const zRadius = clamp((POND.length / Math.max(1, n)) * 0.88, 96, 185);
+  for (let i = 0; i < n; i++) {
+    const t = n === 1 ? 0.5 : i / Math.max(1, n - 1);
+    const x = 100 + Math.sin(t * Math.PI * 1.65 + i * 0.18) * 58;
+    const z = mix(58, 442, t);
+    const y = yBands[i % yBands.length];
+    imageZones.push({
+      imageIndex: i,
+      x,
+      y,
+      z,
+      rx: 86,
+      ry: 28,
+      rz: zRadius
+    });
+  }
+  activeImageIndex = -1;
+  imageBlendWeights = [];
+}
+
+function draw() {
+  const ctx = drawingContext;
+  ctx.clearRect(0, 0, width, height);
+  ctx.fillStyle = '#0b1512';
+  ctx.fillRect(0, 0, width, height);
+  ctx.font = '10px ui-monospace, monospace';
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+  const center = Number(signalCenterControl.value);
+  const span = Number(signalSpanControl.value);
+  const low = center - span * 0.5;
+  const high = center + span * 0.5;
+  for (let division = 0; division <= 4; division++) {
+    const fraction = division / 4;
+    const y = fraction * height;
+    ctx.strokeStyle = 'rgba(157,179,168,0.15)';
+    ctx.beginPath();
+    ctx.moveTo(38, y);
+    ctx.lineTo(width, y);
+    ctx.stroke();
+    ctx.fillStyle = 'rgba(157,179,168,0.72)';
+    ctx.fillText(String(Math.round(high - fraction * span)), 30, y);
+  }
+
+  const threshold = Number(triggerFloorControl.value);
+  const thresholdY = height - clamp((threshold - low) / span, 0, 1) * height;
+  ctx.setLineDash([4, 5]);
+  ctx.strokeStyle = 'rgba(237,170,114,0.62)';
+  ctx.beginPath();
+  ctx.moveTo(38, thresholdY);
+  ctx.lineTo(width, thresholdY);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  if (sensorHistory.length < 2) return;
+  const plotWidth = width - 42;
+  const start = Math.max(0, sensorHistory.length - plotWidth);
+  ctx.beginPath();
+  for (let i = start; i < sensorHistory.length; i++) {
+    const x = 40 + (i - start) / Math.max(1, sensorHistory.length - 1 - start) * (width - 44);
+    const y = height - clamp((sensorHistory[i].value - low) / span, 0, 1) * height;
+    if (i === start) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = '#c4e982';
+  ctx.stroke();
+  const last = sensorHistory[sensorHistory.length - 1];
+  const lastY = height - clamp((last.value - low) / span, 0, 1) * height;
+  ctx.fillStyle = last.change >= Number(spikeThresholdControl.value) ? '#edaa72' : '#c4e982';
+  ctx.beginPath();
+  ctx.arc(width - 4, lastY, 3, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function showNoData(message) {
+  if (sensorMillivolts !== 0 || previousSensorReading !== null) {
+    handleSensorReading(0);
+  } else {
+    liveValueDisplay.textContent = '0';
+    deltaDisplay.textContent = '-- mV';
+    stopVoltageVoice();
+  }
+  dataTimedOut = true;
+  sensorStatus.textContent = message;
+  connectionDot.classList.remove('active');
+}
+
+function moveViewer(dt) {
+  const fast = keyIsDown(16) ? 2.5 : 1;
+  const speed = 0.66 * fast;
+  const keyboardTurn = Number(keyIsDown(39)) - Number(keyIsDown(37));
+  const turn = keyboardTurn;
+  const keyboardForward = Number(keyIsDown(38)) - Number(keyIsDown(40));
+  const forward = keyboardForward;
+  let dx = Math.sin(viewer.yaw) * forward;
+  let dz = Math.cos(viewer.yaw) * forward;
+  let dy = Number(keyIsDown(69)) - Number(keyIsDown(81));
+  const inputMagnitude = Math.hypot(dx, dy, dz);
+  const movementScale = Math.min(1, inputMagnitude);
+  const magnitude = inputMagnitude || 1;
+  dx /= magnitude;
+  dy /= magnitude;
+  dz /= magnitude;
+
+  const ease = 1 - Math.pow(0.78, dt);
+  viewer.yaw += turn * ROTATION_SPEED * fast * dt;
+  viewer.vx += (dx * speed * movementScale - viewer.vx) * ease;
+  viewer.vy += (dy * speed * 0.65 * movementScale - viewer.vy) * ease;
+  viewer.vz += (dz * speed * movementScale - viewer.vz) * ease;
+
+  viewer.x = clamp(viewer.x + viewer.vx * dt, 4, 196);
+  viewer.z = clamp(viewer.z + viewer.vz * dt, 0, 492);
+  viewer.y = clamp(viewer.y + viewer.vy * dt, 5, 96);
+}
+
+function moveParticles(dt) {
+  for (const p of particles) {
+    const activity = stirLevel;
+    const resistance = p.sediment ? 0.985 : 0.978;
+    p.vx = p.vx * resistance + (Math.random() - 0.5) * (p.sediment ? 0.010 : 0.018) * activity * dt;
+    p.vy = p.vy * resistance + (Math.random() - 0.5) * (p.sediment ? 0.004 : 0.012) * activity * dt;
+    p.vz = p.vz * resistance + (Math.random() - 0.5) * (p.sediment ? 0.010 : 0.018) * activity * dt;
+    if (Math.random() < (p.sediment ? 0.00025 : 0.00075) * activity * dt) {
+      p.vx += (Math.random() - 0.5) * (p.sediment ? 0.9 : 2.6);
+      p.vy += (Math.random() - 0.5) * (p.sediment ? 0.25 : 1.7);
+      p.vz += (Math.random() - 0.5) * (p.sediment ? 0.9 : 2.6);
+      p.dart = 18;
+    }
+    p.x = wrap(p.x + p.vx * dt * activity, POND.width);
+    if (p.sediment) p.y = clamp(p.y + p.vy * dt * activity, 90.1, 99.8);
+    else p.y = clamp(p.y + p.vy * dt * activity, 3, 99);
+    p.z = wrap(p.z + p.vz * dt * activity, POND.length);
+    p.dart = Math.max(0, p.dart - dt);
+  }
+}
+
+function moveTextFragments(dt) {
+  const easing = 1 - Math.pow(0.985, dt);
+  for (const fragment of [...fragments, ...sedimentFragments]) {
+    const centerX = fragment.x - POND.width * 0.5;
+    const centerZ = fragment.z - POND.length * 0.5;
+    const centerDistance = Math.max(1, Math.hypot(centerX, centerZ));
+    const sourceX = fragment.x - sensorColumn.x;
+    const sourceZ = fragment.z - sensorColumn.z;
+    const sourceDistance = Math.max(1, Math.hypot(sourceX, sourceZ));
+    const plume = stirLevel * Math.exp(-sourceDistance / 42);
+    const nearBed = smooth(55, 96, fragment.y);
+    const lift = plume * nearBed;
+    const release = plume * (1 - nearBed);
+    const phase = frameCount * 0.002 + fragment.flowPhase;
+
+    let targetVx = centerZ / centerDistance * 0.008;
+    let targetVz = -centerX / centerDistance * 0.008;
+    targetVx -= sourceX / sourceDistance * lift * 0.012;
+    targetVz -= sourceZ / sourceDistance * lift * 0.012;
+    targetVx += sourceX / sourceDistance * release * 0.022;
+    targetVz += sourceZ / sourceDistance * release * 0.022;
+    targetVx += Math.sin(phase) * plume * 0.002;
+    targetVz += Math.cos(phase * 0.83) * plume * 0.002;
+
+    fragment.vx += (targetVx - fragment.vx) * easing;
+    fragment.vy += ((fragment.y < 99 ? 0.005 : 0) - lift * 0.045 - fragment.vy) * easing;
+    fragment.vz += (targetVz - fragment.vz) * easing;
+    fragment.x = wrap(fragment.x + fragment.vx * dt, POND.width);
+    fragment.y = clamp(fragment.y + fragment.vy * dt, 8, 99.8);
+    fragment.z = wrap(fragment.z + fragment.vz * dt, POND.length);
+  }
+}
+
+function updateImageCrossfade() {
+  if (!imagesEnabled || !uploadedImages.length || !imageZones.length) {
+    currentImageStrength = 0;
+    imageBlendWeights = [];
+    activeImageIndex = -1;
+    imageState.currentName = 'none';
+    imageState.nextName = 'none';
+    return;
+  }
+  let bestIndex = 0;
+  let bestStrength = -1;
+  const zoneWeights = [];
+  let totalWeight = 0;
+  for (let i = 0; i < imageZones.length; i++) {
+    const zone = imageZones[i];
+    const strength = zoneStrength(zone);
+    const distance = zoneDistance(zone);
+    const weight = Math.exp(-2.0 * distance * distance);
+    zoneWeights.push(weight);
+    totalWeight += weight;
+    if (strength > bestStrength) {
+      bestStrength = strength;
+      bestIndex = i;
+    }
+  }
+  imageBlendWeights = zoneWeights.map(weight => weight / totalWeight);
+  currentImageStrength = bestStrength;
+  activeImageIndex = imageZones[bestIndex].imageIndex;
+  imageState.currentName = uploadedImages[activeImageIndex] ? uploadedImages[activeImageIndex].name : 'none';
+  const nextZone = imageZones.find((zone, index) => index !== bestIndex && imageBlendWeights[index] > 0.01);
+  imageState.nextName = nextZone && uploadedImages[nextZone.imageIndex]
+    ? uploadedImages[nextZone.imageIndex].name : 'none';
+}
+
+function zoneDistance(zone) {
+  const dx = (viewer.x - zone.x) / zone.rx;
+  const dy = (viewer.y - zone.y) / zone.ry;
+  const dz = (viewer.z - zone.z) / zone.rz;
+  return Math.sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+function zoneStrength(zone) {
+  return 1 - smooth(0.2, 1.45, zoneDistance(zone));
+}
+
+function paintWater() {
+  const ctx = drawingContext;
+  const bg = ctx.createLinearGradient(0, 0, 0, height);
+  bg.addColorStop(0, '#071718');
+  bg.addColorStop(0.58, '#081c1a');
+  bg.addColorStop(1, '#0b1715');
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, width, height);
+
+  const nearBed = smooth(74, 98, viewer.y);
+  const waterTint = currentImageStrength > 0 ? 0.14 + currentImageStrength * 0.18 : 0.12;
+  ctx.fillStyle = `rgba(8,19,18,${waterTint.toFixed(3)})`;
+  ctx.fillRect(0, 0, width, height);
+
+  if (nearBed > 0.01) {
+    ctx.fillStyle = `rgba(33,30,20,${(nearBed * 0.23).toFixed(3)})`;
+    ctx.fillRect(0, 0, width, height);
+  }
+  const fog = ctx.createRadialGradient(width * 0.5, height * 0.48, 10,
+    width * 0.5, height * 0.48, Math.max(width, height) * 0.65);
+  fog.addColorStop(0, 'rgba(0,0,0,0)');
+  fog.addColorStop(1, 'rgba(0,0,0,0.46)');
+  ctx.fillStyle = fog;
+  ctx.fillRect(0, 0, width, height);
+}
+
+function drawPondImages() {
+  if (!imageZones.length) return;
+  const ctx = drawingContext;
+  const candidates = [];
+  for (const zone of imageZones) {
+    const image = uploadedImages[zone.imageIndex];
+    if (!image) continue;
+    const p = project(zone.x, zone.y, zone.z);
+    if (!p) continue;
+    const aspect = image.img.width / Math.max(1, image.img.height);
+    const imageWidth = 36 * p.factor;
+    const imageHeight = imageWidth / aspect;
+    const opacity = (0.06 + zoneStrength(zone) * 0.82) * depthOpacity(p.dz);
+    candidates.push({
+      image: image.img,
+      dz: p.dz,
+      x: p.x - imageWidth * 0.5,
+      y: p.y - imageHeight * 0.5,
+      width: imageWidth,
+      height: imageHeight,
+      opacity
+    });
+  }
+
+  candidates.sort((a, b) => b.dz - a.dz);
+  ctx.save();
+  for (const candidate of candidates) {
+    if (candidate.opacity <= 0.003) continue;
+    ctx.globalAlpha = candidate.opacity;
+    ctx.drawImage(candidate.image, candidate.x, candidate.y, candidate.width, candidate.height);
+  }
+  ctx.restore();
+}
+
+function project(x, y, z) {
+  const offsetX = x - viewer.x;
+  const offsetZ = z - viewer.z;
+  const sinYaw = Math.sin(viewer.yaw);
+  const cosYaw = Math.cos(viewer.yaw);
+  const cameraX = offsetX * cosYaw - offsetZ * sinYaw;
+  const dz = offsetX * sinYaw + offsetZ * cosYaw;
+  if (dz < NEAR || dz > renderLimit()) return null;
+  const focal = Math.min(width, height) * 0.88;
+  const factor = focal / dz;
+  return {
+    x: width * 0.5 + cameraX * factor,
+    y: height * 0.48 + (y - viewer.y) * factor,
+    dz,
+    factor
+  };
+}
+
+function depthOpacity(dz) {
+  const nearFade = smooth(NEAR, 38, dz);
+  const fadeStart = fogEnabled ? Math.max(35, fogDistance * 0.39) : 145;
+  const farFade = 1 - smooth(fadeStart, renderLimit(), dz);
+  return nearFade * farFade;
+}
+
+function drawParticles() {
+  const ctx = drawingContext;
+  const sorted = particles.filter(p => !p.sediment || sedimentEnabled)
+    .map(particle => ({ particle, projection: project(particle.x, particle.y, particle.z) }))
+    .filter(entry => entry.projection)
+    .sort((a, b) => b.projection.dz - a.projection.dz);
+  visibleParticles = 0;
+  visibleDeepParticles = 0;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  for (const { particle, projection: p } of sorted) {
+    if (particle.sediment && Math.abs(particle.y - viewer.y) > 34) continue;
+    if (p.x < -30 || p.x > width + 30 || p.y < -30 || p.y > height + 30) continue;
+    const focus = particle.sediment ? 1 - smooth(12, 34, Math.abs(particle.y - viewer.y)) : 1;
+    const opacity = depthOpacity(p.dz) * focus * (particle.sediment
+      ? (0.12 + 0.50 * particle.bright)
+      : (0.08 + 0.28 * particle.bright));
+    if (opacity < 0.010) continue;
+    const size = clamp((particle.sediment ? 8.0 : 9) * 100 / p.dz, 5, particle.sediment ? 18 : 20);
+    ctx.font = `${size}px monospace`;
+    ctx.fillStyle = particle.sediment
+      ? `rgba(167,170,127,${opacity.toFixed(3)})`
+      : `rgba(154,208,187,${opacity.toFixed(3)})`;
+    ctx.fillText(particle.char, p.x, p.y);
+    visibleParticles++;
+    if (particle.sediment) visibleDeepParticles++;
+    if (particle.dart > 0 && p.dz < 115) {
+      ctx.strokeStyle = `rgba(154,208,187,${(opacity * 0.25).toFixed(3)})`;
+      ctx.lineWidth = 0.7;
+      ctx.beginPath();
+      ctx.moveTo(p.x, p.y);
+      ctx.lineTo(p.x - particle.vx * p.factor * 4, p.y - particle.vy * p.factor * 4);
+      ctx.stroke();
+    }
+  }
+}
+
+function corruptText(content, amount, id, row) {
+  if (!scrambleEnabled || amount < 0.008) return content;
+  const tick = Math.floor(frameCount / 6);
+  let result = '';
+  for (let i = 0; i < content.length; i++) {
+    const char = content[i];
+    if (char === ' ') { result += char; continue; }
+    const shift = id * 31.7 + row * 91.3 + i * 19.7;
+    const noise = hash01(shift + tick * 43.71);
+    result += noise < amount
+      ? GLYPHS[Math.floor(hash01(shift * 0.77 + tick * 17.53) * GLYPHS.length)]
+      : char;
+  }
+  return result;
+}
+
+function hash01(value) {
+  const n = Math.sin(value * 12.9898 + 78.233) * 43758.5453;
+  return n - Math.floor(n);
+}
+
+function scrambleAmount(y, id, dz, isSediment) {
+  if (!scrambleEnabled || stirLevel <= 0.005) return 0;
+  const deep = smooth(58, 100, y);
+  let amount = 0.025 + 0.79 * Math.pow(deep, 1.5);
+  if (isSediment) amount = Math.max(0.55, amount + 0.09);
+  const pulse = 0.82 + 0.17 * Math.sin(frameCount * 0.027 + id * 0.67)
+                      + 0.10 * Math.sin(frameCount * 0.071 + id * 1.31);
+  amount *= pulse;
+  amount *= stirLevel;
+  amount *= 1 - 0.23 * (1 - smooth(22, 90, dz));
+  return clamp(amount, 0, 0.97);
+}
+
+function drawSedimentFragments() {
+  const ctx = drawingContext;
+  const selected = [];
+  for (const fragment of sedimentFragments) {
+    const phase = frameCount * 0.018 + fragment.phase;
+    const driftX = Math.sin(phase) * stirLevel * 5;
+    const driftY = Math.cos(phase * 0.7) * stirLevel * 1.8;
+    const driftZ = Math.sin(phase * 0.43) * stirLevel * 8;
+    const p = project(fragment.x + driftX, fragment.y + driftY, fragment.z + driftZ);
+    if (!p || p.x < -100 || p.x > width + 100 || p.y < -50 || p.y > height + 50) continue;
+    const proximity = 1 - smooth(12, 34, Math.abs(viewer.y - fragment.y));
+    const opacity = depthOpacity(p.dz) * proximity * (0.28 + fragment.tone * 0.32);
+    if (opacity < 0.022) continue;
+    selected.push({ fragment, p, opacity });
+  }
+  selected.sort((a, b) => a.p.dz - b.p.dz);
+  const toRender = selected.slice(0, 66).sort((a, b) => b.p.dz - a.p.dz);
+  visibleSediment = toRender.length;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  for (const {fragment, p, opacity} of toRender) {
+    const size = clamp(11 * 108 / p.dz, 7, 22);
+    const amount = scrambleAmount(fragment.y, fragment.id, p.dz, true);
+    const text = corruptText(fragment.line, amount, fragment.id, 0);
+    const microShift = scrambleEnabled ? Math.sin(frameCount * 0.17 + fragment.phase) * amount * 2.2 * stirLevel : 0;
+    ctx.font = `${size}px monospace`;
+    ctx.fillStyle = `rgba(188,193,150,${opacity.toFixed(3)})`;
+    ctx.fillText(text, p.x + microShift, p.y);
+  }
+}
+
+function drawFragments() {
+  const ctx = drawingContext;
+  const candidates = fragments.map(fragment => {
+    const p = project(fragment.x, fragment.y, fragment.z);
+    if (!p) return null;
+    const vertical = 1 - smooth(34, 69, Math.abs(fragment.y - viewer.y));
+    const centre = 1 - 0.76 * smooth(width * 0.16, width * 0.57, Math.abs(p.x - width * 0.5));
+    const opacity = depthOpacity(p.dz) * vertical * centre;
+    const size = clamp(13 * 108 / p.dz, 7, 31);
+    const lineHeight = size * 1.45;
+    const longest = Math.max(...fragment.lines.map(s => s.length));
+    const box = {
+      left: p.x - longest * size * 0.32 - 12,
+      right: p.x + longest * size * 0.32 + 12,
+      top: p.y - fragment.lines.length * lineHeight * 0.5 - 10,
+      bottom: p.y + fragment.lines.length * lineHeight * 0.5 + 10
+    };
+    return { fragment, p, opacity, size, lineHeight, box };
+  }).filter(o => o && o.opacity >= 0.08 &&
+    o.p.x > -180 && o.p.x < width + 180 &&
+    o.p.y > -110 && o.p.y < height + 110)
+    .sort((a, b) => b.opacity - a.opacity);
+
+  const selected = [];
+  for (const c of candidates) {
+    if (selected.length >= 7) break;
+    const overlap = selected.some(s =>
+      c.box.left < s.box.right && c.box.right > s.box.left &&
+      c.box.top < s.box.bottom && c.box.bottom > s.box.top);
+    if (!overlap) selected.push(c);
+  }
+  selected.sort((a, b) => b.p.dz - a.p.dz);
+  visibleFragments = selected.length;
+
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  for (const { fragment, p, opacity, size, lineHeight } of selected) {
+    const firstLineY = p.y - (fragment.lines.length - 1) * lineHeight * 0.5;
+    ctx.font = `${size}px monospace`;
+    ctx.fillStyle = `rgba(188,229,205,${(opacity * 0.92).toFixed(3)})`;
+    const amount = scrambleAmount(fragment.y, fragment.id, p.dz, false);
+    for (let i = 0; i < fragment.lines.length; i++) {
+      const text = corruptText(fragment.lines[i], amount, fragment.id, i);
+      const shift = scrambleEnabled ? Math.sin(frameCount * 0.13 + fragment.id * 2.7 + i) * amount * 4 : 0;
+      ctx.fillText(text, p.x + shift, firstLineY + i * lineHeight);
+    }
+  }
+}
+
+function drawFloorGrid() {
+  const ctx = drawingContext;
+  ctx.lineWidth = 0.7;
+  for (let z = 0; z <= POND.length; z += 25) {
+    const a = project(0, 100, z);
+    const b = project(200, 100, z);
+    if (a && b) drawProjectedLine(ctx, a, b);
+  }
+  for (let x = 0; x <= 200; x += 20) {
+    for (let z = 0; z < POND.length; z += 25) {
+      const a = project(x, 100, z);
+      const b = project(x, 100, z + 25);
+      if (a && b) drawProjectedLine(ctx, a, b);
+    }
+  }
+}
+
+function drawProjectedLine(ctx, a, b) {
+  const opacity = 0.15 * depthOpacity((a.dz + b.dz) * 0.5);
+  if (opacity < 0.008) return;
+  ctx.strokeStyle = `rgba(116,183,153,${opacity.toFixed(3)})`;
+  ctx.beginPath();
+  ctx.moveTo(a.x, a.y);
+  ctx.lineTo(b.x, b.y);
+  ctx.stroke();
+}
+
+function drawInterface() {
+  const ctx = drawingContext;
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'alphabetic';
+  ctx.font = '11px monospace';
+  ctx.fillStyle = 'rgba(185,229,209,0.72)';
+  ctx.fillText('POND   /   ITERATION 03   /   SENSOR TONES', 20, 28);
+  ctx.fillStyle = 'rgba(166,200,186,0.50)';
+  ctx.fillText(`X ${Math.round(viewer.x)}/200   DEPTH ${Math.round(viewer.y)}/100   LENGTH ${Math.round(viewer.z)}/500`, 20, 47);
+  ctx.fillText(`FOG ${fogEnabled ? 'ON ' + fogDistance : 'OFF ' + FAR}cm   [ / ] adjust   F toggle   /   ${Math.round(fpsEstimate)} fps`, 20, height - 93);
+  ctx.fillText(`TEXT ${visibleFragments}   SEDIMENT ${visibleSediment}   MOTILE LETTERS ${visibleParticles}  (${visibleDeepParticles} deep)`, 20, height - 75);
+  const imageLine = uploadedImages.length
+    ? `IMAGES ${uploadedImages.length}   ACTIVE ${shortName(imageState.currentName)}   STRENGTH ${currentImageStrength.toFixed(2)}`
+    : 'IMAGES 0   Use the upload button or press U to add images';
+  ctx.fillText(imageLine, 20, height - 57);
+  ctx.fillText('← → rotate    ↑ ↓ forward/back    Q rise    E sink    SHIFT faster', 20, height - 39);
+  ctx.fillText('T glitch    N bed layer    U upload    I images    H interface    G grid    R reset', 20, height - 22);
+
+  const gx = width - 25, gy = 190, gh = Math.max(65, Math.min(160, height - 290));
+  ctx.strokeStyle = 'rgba(172,208,191,0.32)';
+  ctx.strokeRect(gx, gy, 7, gh);
+  ctx.fillStyle = 'rgba(169,145,93,0.22)';
+  ctx.fillRect(gx + 1, gy + gh * 0.9, 5, gh * 0.1 - 1);
+  ctx.fillStyle = '#dce9cb';
+  ctx.fillRect(gx - 3, gy + gh * viewer.y / 100 - 1, 13, 2);
+  ctx.fillStyle = 'rgba(166,200,186,0.5)';
+  ctx.fillText('0', gx - 11, gy - 6);
+  ctx.fillText('100', gx - 25, gy + gh + 13);
+
+  const mx = width - 95, my = 24, mw = 58, mh = 125;
+  ctx.fillStyle = 'rgba(2,11,11,0.53)';
+  ctx.fillRect(mx - 10, my - 8, mw + 20, mh + 34);
+  ctx.strokeStyle = 'rgba(172,208,191,0.35)';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(mx, my, mw, mh);
+  for (const f of fragments) {
+    const x = mx + f.x / POND.width * mw;
+    const y = my + f.z / POND.length * mh;
+    ctx.fillStyle = f.y >= SEDIMENT_START ? 'rgba(188,166,112,0.20)' : 'rgba(155,199,168,0.24)';
+    ctx.fillRect(x - 1, y - 1, 2, 2);
+  }
+  if (uploadedImages.length) {
+    for (const zone of imageZones) {
+      const zx = mx + zone.x / POND.width * mw;
+      const zy = my + zone.z / POND.length * mh;
+      const zw = zone.rx / POND.width * mw;
+      const zh = zone.rz / POND.length * mh;
+      const active = zone.imageIndex === activeImageIndex;
+      ctx.strokeStyle = active ? 'rgba(223,232,190,0.74)' : 'rgba(138,179,168,0.34)';
+      ctx.strokeRect(zx - zw * 0.5, zy - zh * 0.5, zw, zh);
+      ctx.fillStyle = active ? 'rgba(223,232,190,0.74)' : 'rgba(138,179,168,0.34)';
+      ctx.fillRect(zx - 2, zy - 2, 4, 4);
+    }
+  }
+  ctx.fillStyle = '#e0e9ce';
+  ctx.beginPath();
+  ctx.arc(mx + viewer.x / POND.width * mw, my + viewer.z / POND.length * mh, 3, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = 'rgba(166,200,186,0.5)';
+  ctx.fillText('PLAN', mx + 15, my + mh + 16);
+}
+
+function shortName(name) {
+  if (!name || name === 'none') return 'none';
+  return name.length > 28 ? name.slice(0, 25) + '...' : name;
+}
+
+function keyPressed() {
+  if (key === 'f' || key === 'F') fogEnabled = !fogEnabled;
+  if (key === '[') { fogDistance = clamp(fogDistance - 20, MIN_FOG, FAR); fogEnabled = true; }
+  if (key === ']') { fogDistance = clamp(fogDistance + 20, MIN_FOG, FAR); fogEnabled = true; }
+  if (key === 't' || key === 'T') scrambleEnabled = !scrambleEnabled;
+  if (key === 'n' || key === 'N') sedimentEnabled = !sedimentEnabled;
+  if (key === 'i' || key === 'I') imagesEnabled = !imagesEnabled;
+  if (key === 'u' || key === 'U') { if (uploadInput) uploadInput.click(); }
+  if (key === 'h' || key === 'H') showHUD = !showHUD;
+  if (key === 'g' || key === 'G') showGrid = !showGrid;
+  if (key === 'r' || key === 'R') {
+    viewer = { x: 100, y: 64, z: 10, yaw: 0, vx: 0, vy: 0, vz: 0 };
+    positionSensorColumnInFront();
+  }
+  if ([37, 38, 39, 40, 32].includes(keyCode)) return false;
+}
+
+function windowResized() {
+  const bounds = drawingContext.canvas.parentElement.getBoundingClientRect();
+  resizeCanvas(Math.max(1, Math.floor(bounds.width)), Math.max(1, Math.floor(bounds.height)));
+}
+
+function smooth(a, b, x) {
+  const t = clamp((x - a) / (b - a), 0, 1);
+  return t * t * (3 - 2 * t);
+}
+function clamp(n, a, b) { return Math.max(a, Math.min(b, n)); }
+function wrap(x, limit) { return (x % limit + limit) % limit; }
+function mix(a, b, t) { return a + (b - a) * t; }
+function seededRandom(seed) {
+  return function() {
+    seed |= 0;
+    seed = seed + 0x6D2B79F5 | 0;
+    let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+    t ^= t + Math.imul(t ^ t >>> 7, 61 | t);
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+</script>
+<script>
+if(typeof setup==='function') setup();
+let last = performance.now();
+function loop(now){
+ deltaTime = now - last; last = now; frameCount++;
+ if(typeof draw==='function') draw();
+ requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script></body></html>

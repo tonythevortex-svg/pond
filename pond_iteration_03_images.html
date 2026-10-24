@@ -1,0 +1,817 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>POND / Iteration 03 / Image Sediment</title>
+<style>html,body{margin:0;width:100%;height:100%;background:#061512;overflow:hidden}canvas{display:block;width:100%;height:100%}button:hover{filter:brightness(1.08)}</style></head><body><canvas aria-label="Navigable pond of text and image fragments"></canvas>
+<script>
+let width=0, height=0, drawingContext=null, deltaTime=16.667, frameCount=0;
+let windowWidth=window.innerWidth, windowHeight=window.innerHeight;
+let key='', keyCode=0;
+const activeKeys = new Set();
+function createCanvas(w,h){
+ const canvas=document.querySelector('canvas');
+ canvas.width=width=w; canvas.height=height=h;
+ drawingContext=canvas.getContext('2d');
+ return canvas;
+}
+function resizeCanvas(w,h){
+ const canvas=document.querySelector('canvas');
+ canvas.width=width=w; canvas.height=height=h;
+}
+function pixelDensity(n){}
+function keyIsDown(code){ return activeKeys.has(code); }
+window.addEventListener('keydown',e=>{
+ activeKeys.add(e.keyCode); key=e.key; keyCode=e.keyCode;
+ if(!e.repeat && typeof keyPressed==='function') keyPressed();
+ if ([37,38,39,40,32].includes(e.keyCode)) e.preventDefault();
+});
+window.addEventListener('keyup',e=>activeKeys.delete(e.keyCode));
+window.addEventListener('blur',()=>activeKeys.clear());
+window.addEventListener('resize',()=>{
+ windowWidth=innerWidth; windowHeight=innerHeight;
+ if(typeof windowResized==='function') windowResized();
+});
+</script>
+<script>
+// POND / Iteration 03: Spatial image zones + background crossfades
+// Paste everything into https://editor.p5js.org/ (sketch.js)
+// Controls: left/right rotate, up/down move relative to facing, Q = rise, E = sink, Shift = faster.
+// F = toggle fog, [ ] = visibility; T = scramble, N = sediment layer.
+// U = upload images, I = toggle images, H = HUD, G = grid, R = reset.
+// Uploaded images stay anchored in pond space and grow with perspective.
+// Optional WebXR AR tracking maps real phone movement into the pond volume.
+
+const POND = { width: 200, length: 500, depth: 100 };
+const NEAR = 14;
+const ROTATION_SPEED = 0.035;
+const FAR = 320;
+let fogEnabled = true;
+let fogDistance = 145;
+const MIN_FOG = 70;
+const SEDIMENT_START = 90;
+const GLYPHS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789#@%&?*+=/\\<>[]{}:_~';
+let scrambleEnabled = true;
+let sedimentEnabled = true;
+let imagesEnabled = true;
+let visibleSediment = 0;
+let visibleDeepParticles = 0;
+let visibleParticles = 0;
+let visibleFragments = 0;
+let fpsEstimate = 60;
+
+function renderLimit() { return fogEnabled ? fogDistance : FAR; }
+
+const PROMPTS = [
+  'What is growing\nbeneath this surface?',
+  'Where does the structure\nbecome an environment?',
+  'What moves too slowly\nto be noticed?',
+  'What holds this place\ntogether?',
+  'Look towards the\noverlooked edge.',
+  'Who maintains\nthis boundary?',
+  'Which traces belong\nto more than one life?',
+  'Where might the\nwater have travelled?',
+  'What gathers in\nthe spaces between?',
+  'Can a surface\nremember contact?',
+  'What forms of attention\ndoes this place invite?',
+  'What remains hidden\nin plain sight?',
+  'How does time\naccumulate here?',
+  'What is the smallest\nchange you can detect?',
+  'Where does decay\nbecome material?',
+  'Which relationships\nare easily overlooked?',
+  'Where does one\nsystem become another?',
+  'What can be sensed\nwithout being seen?',
+  'How is this place\nbeing remade?',
+  'What lives alongside\nthe infrastructure?',
+  'Who or what passes\nthrough this site?',
+  'What is carried\nby the surface?',
+  'Where does the\nsediment settle?',
+  'What might interrupt\nthis arrangement?',
+  'Which materials\nare in motion?',
+  'How does the site\nshape your attention?',
+  'What has been\nleft undisturbed?',
+  'What might emerge\nif you wait?'
+];
+
+let viewer = { x: 100, y: 64, z: 10, yaw: 0, vx: 0, vy: 0, vz: 0 };
+let fragments = [];
+let sedimentFragments = [];
+let particles = [];
+let showHUD = true;
+let showGrid = false;
+let random01;
+
+let uploadedImages = [];
+let imageZones = [];
+let uploadPanel = null;
+let uploadInput = null;
+let uploadStatus = null;
+let activeImageIndex = -1;
+let currentImageStrength = 0;
+let imageBlendWeights = [];
+let imageState = {
+  currentName: 'none',
+  nextName: 'none'
+};
+
+function setup() {
+  createCanvas(windowWidth, windowHeight);
+  pixelDensity(1);
+  random01 = seededRandom(13972);
+  initialisePond();
+  createUploadUI();
+}
+
+function initialisePond() {
+  const anchors = [
+    { x: 100, y: 61, z: 106 },
+    { x: 76, y: 80, z: 161 },
+    { x: 132, y: 49, z: 203 },
+    { x: 97, y: 90, z: 248 },
+    { x: 126, y: 73, z: 310 },
+    { x: 74, y: 58, z: 383 }
+  ];
+  fragments = PROMPTS.map((content, i) => {
+    const position = i < anchors.length ? anchors[i] : {
+      x: 15 + random01() * 170,
+      y: 34 + Math.pow(random01(), 0.6) * 63,
+      z: 32 + random01() * 446
+    };
+    return { ...position, lines: content.split('\n'), id: i };
+  });
+
+  for (let i = 0; i < 42; i++) {
+    fragments.push({
+      x: 7 + random01() * 186,
+      y: SEDIMENT_START + random01() * 9.8,
+      z: 15 + random01() * 468,
+      lines: PROMPTS[Math.floor(random01() * PROMPTS.length)].split('\n'),
+      id: PROMPTS.length + i
+    });
+  }
+
+  const sourceLines = PROMPTS.map(s => s.replace(/\n/g, ' ').split(' '));
+  sedimentFragments = [];
+  for (let i = 0; i < 230; i++) {
+    const words = sourceLines[Math.floor(random01() * sourceLines.length)];
+    const index = Math.floor(random01() * words.length);
+    const count = 1 + Math.floor(random01() * 5);
+    const phrase = words.slice(index, index + count).join(' ');
+    sedimentFragments.push({
+      x: 4 + random01() * 192,
+      y: SEDIMENT_START + Math.pow(random01(), 0.8) * 9.8,
+      z: 9 + random01() * 481,
+      line: phrase,
+      id: i + 2000,
+      tone: random01(),
+      phase: random01() * 6.28318
+    });
+  }
+
+  const alphabet = '._-:;+/\\|*?()[]{}~abcdefghijklmnopqrstuvwxyz';
+  particles = [];
+  for (let i = 0; i < 230; i++) particles.push(makeParticle(i, false, alphabet));
+  for (let i = 0; i < 1150; i++) particles.push(makeParticle(i + 230, true, alphabet));
+}
+
+function makeParticle(id, sediment, alphabet) {
+  return {
+    x: random01() * POND.width,
+    y: sediment ? SEDIMENT_START + random01() * 9.8 : 15 + random01() * 85,
+    z: random01() * POND.length,
+    vx: (random01() - 0.5) * (sediment ? 0.10 : 0.20),
+    vy: (random01() - 0.5) * (sediment ? 0.035 : 0.10),
+    vz: (random01() - 0.5) * (sediment ? 0.10 : 0.20),
+    char: alphabet[Math.floor(random01() * alphabet.length)],
+    bright: random01(),
+    sediment,
+    dart: 0,
+    id
+  };
+}
+
+function createUploadUI() {
+  uploadPanel = document.createElement('div');
+  uploadPanel.style.position = 'fixed';
+  uploadPanel.style.top = '18px';
+  uploadPanel.style.right = '18px';
+  uploadPanel.style.zIndex = '10';
+  uploadPanel.style.padding = '10px 12px';
+  uploadPanel.style.background = 'rgba(3, 11, 11, 0.64)';
+  uploadPanel.style.border = '1px solid rgba(172,208,191,0.25)';
+  uploadPanel.style.backdropFilter = 'blur(5px)';
+  uploadPanel.style.font = '11px monospace';
+  uploadPanel.style.color = 'rgba(198,225,214,0.82)';
+  uploadPanel.style.maxWidth = '280px';
+  uploadPanel.style.lineHeight = '1.35';
+
+  const label = document.createElement('div');
+  label.textContent = 'POND IMAGES';
+  label.style.marginBottom = '6px';
+  label.style.letterSpacing = '0.06em';
+  label.style.color = 'rgba(216,236,228,0.92)';
+
+  const button = document.createElement('button');
+  button.textContent = 'Upload images';
+  button.style.font = '11px monospace';
+  button.style.padding = '6px 9px';
+  button.style.background = 'rgba(20, 43, 39, 0.94)';
+  button.style.color = 'rgba(216,236,228,0.92)';
+  button.style.border = '1px solid rgba(172,208,191,0.35)';
+  button.style.cursor = 'pointer';
+  button.style.marginRight = '8px';
+  button.onclick = () => uploadInput && uploadInput.click();
+
+  const clearButton = document.createElement('button');
+  clearButton.textContent = 'Clear';
+  clearButton.style.font = '11px monospace';
+  clearButton.style.padding = '6px 9px';
+  clearButton.style.background = 'rgba(20, 43, 39, 0.68)';
+  clearButton.style.color = 'rgba(216,236,228,0.92)';
+  clearButton.style.border = '1px solid rgba(172,208,191,0.28)';
+  clearButton.style.cursor = 'pointer';
+  clearButton.onclick = clearUploadedImages;
+
+  uploadInput = document.createElement('input');
+  uploadInput.type = 'file';
+  uploadInput.accept = 'image/*';
+  uploadInput.multiple = true;
+  uploadInput.style.display = 'none';
+  uploadInput.addEventListener('change', (event) => loadSelectedImages(event.target.files));
+
+  uploadStatus = document.createElement('div');
+  uploadStatus.style.marginTop = '8px';
+  uploadStatus.style.color = 'rgba(178,205,193,0.76)';
+  uploadStatus.textContent = 'No images loaded. U opens the upload dialog.';
+
+  const hint = document.createElement('div');
+  hint.style.marginTop = '6px';
+  hint.style.color = 'rgba(140,177,164,0.68)';
+  hint.textContent = 'Images stay anchored in their pond zones.';
+
+  uploadPanel.appendChild(label);
+  uploadPanel.appendChild(button);
+  uploadPanel.appendChild(clearButton);
+  uploadPanel.appendChild(uploadInput);
+  uploadPanel.appendChild(uploadStatus);
+  uploadPanel.appendChild(hint);
+  document.body.appendChild(uploadPanel);
+}
+
+function loadSelectedImages(fileList) {
+  const files = Array.from(fileList || []).filter(file => file.type && file.type.startsWith('image/'));
+  if (!files.length) return;
+  clearUploadedImages(false);
+  uploadStatus.textContent = `Loading ${files.length} image${files.length === 1 ? '' : 's'}...`;
+  let loaded = 0;
+  files.forEach((file, index) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      uploadedImages[index] = { img, name: file.name };
+      URL.revokeObjectURL(url);
+      loaded++;
+      if (loaded === files.length) {
+        uploadedImages = uploadedImages.filter(Boolean);
+        distributeImageZones();
+        imagesEnabled = uploadedImages.length > 0;
+        updateUploadStatus();
+      }
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      loaded++;
+      if (loaded === files.length) {
+        uploadedImages = uploadedImages.filter(Boolean);
+        distributeImageZones();
+        imagesEnabled = uploadedImages.length > 0;
+        updateUploadStatus();
+      }
+    };
+    img.src = url;
+  });
+  if (uploadInput) uploadInput.value = '';
+}
+
+function clearUploadedImages(updateStatus = true) {
+  uploadedImages = [];
+  imageZones = [];
+  activeImageIndex = -1;
+  imageBlendWeights = [];
+  currentImageStrength = 0;
+  imageState.currentName = 'none';
+  imageState.nextName = 'none';
+  if (updateStatus) updateUploadStatus();
+}
+
+function updateUploadStatus() {
+  if (!uploadStatus) return;
+  if (!uploadedImages.length) {
+    uploadStatus.textContent = 'No images loaded. U opens the upload dialog.';
+    return;
+  }
+  const zoneText = imageZones.length === 1 ? '1 image zone' : `${imageZones.length} image zones`;
+  uploadStatus.textContent = `${uploadedImages.length} image${uploadedImages.length === 1 ? '' : 's'} loaded. ${zoneText}.`;
+}
+
+function distributeImageZones() {
+  imageZones = [];
+  const n = uploadedImages.length;
+  if (!n) return;
+  const yBands = [24, 52, 82];
+  const zRadius = clamp((POND.length / Math.max(1, n)) * 0.88, 96, 185);
+  for (let i = 0; i < n; i++) {
+    const t = n === 1 ? 0.5 : i / Math.max(1, n - 1);
+    const x = 100 + Math.sin(t * Math.PI * 1.65 + i * 0.18) * 58;
+    const z = mix(58, 442, t);
+    const y = yBands[i % yBands.length];
+    imageZones.push({
+      imageIndex: i,
+      x,
+      y,
+      z,
+      rx: 86,
+      ry: 28,
+      rz: zRadius
+    });
+  }
+  activeImageIndex = -1;
+  imageBlendWeights = [];
+}
+
+function draw() {
+  const dt = Math.min(2.1, Math.max(0.1, deltaTime / 16.667));
+  fpsEstimate = fpsEstimate * 0.93 + (1000 / Math.max(deltaTime, 1)) * 0.07;
+  moveViewer(dt);
+  moveParticles(dt);
+  updateImageCrossfade();
+  paintWater();
+  if (imagesEnabled && uploadedImages.length) drawPondImages();
+  if (showGrid) drawFloorGrid();
+  drawParticles();
+  if (sedimentEnabled) drawSedimentFragments();
+  else visibleSediment = 0;
+  drawFragments();
+  if (showHUD) drawInterface();
+}
+
+function moveViewer(dt) {
+  const fast = keyIsDown(16) ? 2.5 : 1;
+  const speed = 0.66 * fast;
+  const keyboardTurn = Number(keyIsDown(39)) - Number(keyIsDown(37));
+  const turn = keyboardTurn;
+  const keyboardForward = Number(keyIsDown(38)) - Number(keyIsDown(40));
+  const forward = keyboardForward;
+  let dx = Math.sin(viewer.yaw) * forward;
+  let dz = Math.cos(viewer.yaw) * forward;
+  let dy = Number(keyIsDown(69)) - Number(keyIsDown(81));
+  const inputMagnitude = Math.hypot(dx, dy, dz);
+  const movementScale = Math.min(1, inputMagnitude);
+  const magnitude = inputMagnitude || 1;
+  dx /= magnitude;
+  dy /= magnitude;
+  dz /= magnitude;
+
+  const ease = 1 - Math.pow(0.78, dt);
+  viewer.yaw += turn * ROTATION_SPEED * fast * dt;
+  viewer.vx += (dx * speed * movementScale - viewer.vx) * ease;
+  viewer.vy += (dy * speed * 0.65 * movementScale - viewer.vy) * ease;
+  viewer.vz += (dz * speed * movementScale - viewer.vz) * ease;
+
+  viewer.x = clamp(viewer.x + viewer.vx * dt, 4, 196);
+  viewer.z = clamp(viewer.z + viewer.vz * dt, 0, 492);
+  viewer.y = clamp(viewer.y + viewer.vy * dt, 5, 96);
+}
+
+function moveParticles(dt) {
+  for (const p of particles) {
+    const resistance = p.sediment ? 0.985 : 0.978;
+    p.vx = p.vx * resistance + (Math.random() - 0.5) * (p.sediment ? 0.010 : 0.018) * dt;
+    p.vy = p.vy * resistance + (Math.random() - 0.5) * (p.sediment ? 0.004 : 0.012) * dt;
+    p.vz = p.vz * resistance + (Math.random() - 0.5) * (p.sediment ? 0.010 : 0.018) * dt;
+    if (Math.random() < (p.sediment ? 0.00025 : 0.00075) * dt) {
+      p.vx += (Math.random() - 0.5) * (p.sediment ? 0.9 : 2.6);
+      p.vy += (Math.random() - 0.5) * (p.sediment ? 0.25 : 1.7);
+      p.vz += (Math.random() - 0.5) * (p.sediment ? 0.9 : 2.6);
+      p.dart = 18;
+    }
+    p.x = wrap(p.x + p.vx * dt, POND.width);
+    if (p.sediment) p.y = clamp(p.y + p.vy * dt, 90.1, 99.8);
+    else p.y = clamp(p.y + p.vy * dt, 3, 99);
+    p.z = wrap(p.z + p.vz * dt, POND.length);
+    p.dart = Math.max(0, p.dart - dt);
+  }
+}
+
+function updateImageCrossfade() {
+  if (!imagesEnabled || !uploadedImages.length || !imageZones.length) {
+    currentImageStrength = 0;
+    imageBlendWeights = [];
+    activeImageIndex = -1;
+    imageState.currentName = 'none';
+    imageState.nextName = 'none';
+    return;
+  }
+  let bestIndex = 0;
+  let bestStrength = -1;
+  const zoneWeights = [];
+  let totalWeight = 0;
+  for (let i = 0; i < imageZones.length; i++) {
+    const zone = imageZones[i];
+    const strength = zoneStrength(zone);
+    const distance = zoneDistance(zone);
+    const weight = Math.exp(-2.0 * distance * distance);
+    zoneWeights.push(weight);
+    totalWeight += weight;
+    if (strength > bestStrength) {
+      bestStrength = strength;
+      bestIndex = i;
+    }
+  }
+  imageBlendWeights = zoneWeights.map(weight => weight / totalWeight);
+  currentImageStrength = bestStrength;
+  activeImageIndex = imageZones[bestIndex].imageIndex;
+  imageState.currentName = uploadedImages[activeImageIndex] ? uploadedImages[activeImageIndex].name : 'none';
+  const nextZone = imageZones.find((zone, index) => index !== bestIndex && imageBlendWeights[index] > 0.01);
+  imageState.nextName = nextZone && uploadedImages[nextZone.imageIndex]
+    ? uploadedImages[nextZone.imageIndex].name : 'none';
+}
+
+function zoneDistance(zone) {
+  const dx = (viewer.x - zone.x) / zone.rx;
+  const dy = (viewer.y - zone.y) / zone.ry;
+  const dz = (viewer.z - zone.z) / zone.rz;
+  return Math.sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+function zoneStrength(zone) {
+  return 1 - smooth(0.2, 1.45, zoneDistance(zone));
+}
+
+function paintWater() {
+  const ctx = drawingContext;
+  const bg = ctx.createLinearGradient(0, 0, 0, height);
+  bg.addColorStop(0, '#071718');
+  bg.addColorStop(0.58, '#081c1a');
+  bg.addColorStop(1, '#0b1715');
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, width, height);
+
+  const nearBed = smooth(74, 98, viewer.y);
+  const waterTint = currentImageStrength > 0 ? 0.14 + currentImageStrength * 0.18 : 0.12;
+  ctx.fillStyle = `rgba(8,19,18,${waterTint.toFixed(3)})`;
+  ctx.fillRect(0, 0, width, height);
+
+  if (nearBed > 0.01) {
+    ctx.fillStyle = `rgba(33,30,20,${(nearBed * 0.23).toFixed(3)})`;
+    ctx.fillRect(0, 0, width, height);
+  }
+  const fog = ctx.createRadialGradient(width * 0.5, height * 0.48, 10,
+    width * 0.5, height * 0.48, Math.max(width, height) * 0.65);
+  fog.addColorStop(0, 'rgba(0,0,0,0)');
+  fog.addColorStop(1, 'rgba(0,0,0,0.46)');
+  ctx.fillStyle = fog;
+  ctx.fillRect(0, 0, width, height);
+}
+
+function drawPondImages() {
+  if (!imageZones.length) return;
+  const ctx = drawingContext;
+  const candidates = [];
+  for (const zone of imageZones) {
+    const image = uploadedImages[zone.imageIndex];
+    if (!image) continue;
+    const p = project(zone.x, zone.y, zone.z);
+    if (!p) continue;
+    const aspect = image.img.width / Math.max(1, image.img.height);
+    const imageWidth = 36 * p.factor;
+    const imageHeight = imageWidth / aspect;
+    const opacity = (0.06 + zoneStrength(zone) * 0.82) * depthOpacity(p.dz);
+    candidates.push({
+      image: image.img,
+      dz: p.dz,
+      x: p.x - imageWidth * 0.5,
+      y: p.y - imageHeight * 0.5,
+      width: imageWidth,
+      height: imageHeight,
+      opacity
+    });
+  }
+
+  candidates.sort((a, b) => b.dz - a.dz);
+  ctx.save();
+  for (const candidate of candidates) {
+    if (candidate.opacity <= 0.003) continue;
+    ctx.globalAlpha = candidate.opacity;
+    ctx.drawImage(candidate.image, candidate.x, candidate.y, candidate.width, candidate.height);
+  }
+  ctx.restore();
+}
+
+function project(x, y, z) {
+  const offsetX = x - viewer.x;
+  const offsetZ = z - viewer.z;
+  const sinYaw = Math.sin(viewer.yaw);
+  const cosYaw = Math.cos(viewer.yaw);
+  const cameraX = offsetX * cosYaw - offsetZ * sinYaw;
+  const dz = offsetX * sinYaw + offsetZ * cosYaw;
+  if (dz < NEAR || dz > renderLimit()) return null;
+  const focal = Math.min(width, height) * 0.88;
+  const factor = focal / dz;
+  return {
+    x: width * 0.5 + cameraX * factor,
+    y: height * 0.48 + (y - viewer.y) * factor,
+    dz,
+    factor
+  };
+}
+
+function depthOpacity(dz) {
+  const nearFade = smooth(NEAR, 38, dz);
+  const fadeStart = fogEnabled ? Math.max(35, fogDistance * 0.39) : 145;
+  const farFade = 1 - smooth(fadeStart, renderLimit(), dz);
+  return nearFade * farFade;
+}
+
+function drawParticles() {
+  const ctx = drawingContext;
+  const sorted = particles.filter(p => !p.sediment || sedimentEnabled)
+    .map(particle => ({ particle, projection: project(particle.x, particle.y, particle.z) }))
+    .filter(entry => entry.projection)
+    .sort((a, b) => b.projection.dz - a.projection.dz);
+  visibleParticles = 0;
+  visibleDeepParticles = 0;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  for (const { particle, projection: p } of sorted) {
+    if (particle.sediment && Math.abs(particle.y - viewer.y) > 34) continue;
+    if (p.x < -30 || p.x > width + 30 || p.y < -30 || p.y > height + 30) continue;
+    const focus = particle.sediment ? 1 - smooth(12, 34, Math.abs(particle.y - viewer.y)) : 1;
+    const opacity = depthOpacity(p.dz) * focus * (particle.sediment
+      ? (0.12 + 0.50 * particle.bright)
+      : (0.08 + 0.28 * particle.bright));
+    if (opacity < 0.010) continue;
+    const size = clamp((particle.sediment ? 8.0 : 9) * 100 / p.dz, 5, particle.sediment ? 18 : 20);
+    ctx.font = `${size}px monospace`;
+    ctx.fillStyle = particle.sediment
+      ? `rgba(167,170,127,${opacity.toFixed(3)})`
+      : `rgba(154,208,187,${opacity.toFixed(3)})`;
+    ctx.fillText(particle.char, p.x, p.y);
+    visibleParticles++;
+    if (particle.sediment) visibleDeepParticles++;
+    if (particle.dart > 0 && p.dz < 115) {
+      ctx.strokeStyle = `rgba(154,208,187,${(opacity * 0.25).toFixed(3)})`;
+      ctx.lineWidth = 0.7;
+      ctx.beginPath();
+      ctx.moveTo(p.x, p.y);
+      ctx.lineTo(p.x - particle.vx * p.factor * 4, p.y - particle.vy * p.factor * 4);
+      ctx.stroke();
+    }
+  }
+}
+
+function corruptText(content, amount, id, row) {
+  if (!scrambleEnabled || amount < 0.008) return content;
+  const tick = Math.floor(frameCount / 6);
+  let result = '';
+  for (let i = 0; i < content.length; i++) {
+    const char = content[i];
+    if (char === ' ') { result += char; continue; }
+    const shift = id * 31.7 + row * 91.3 + i * 19.7;
+    const noise = hash01(shift + tick * 43.71);
+    result += noise < amount
+      ? GLYPHS[Math.floor(hash01(shift * 0.77 + tick * 17.53) * GLYPHS.length)]
+      : char;
+  }
+  return result;
+}
+
+function hash01(value) {
+  const n = Math.sin(value * 12.9898 + 78.233) * 43758.5453;
+  return n - Math.floor(n);
+}
+
+function scrambleAmount(y, id, dz, isSediment) {
+  if (!scrambleEnabled) return 0;
+  const deep = smooth(58, 100, y);
+  let amount = 0.025 + 0.79 * Math.pow(deep, 1.5);
+  if (isSediment) amount = Math.max(0.55, amount + 0.09);
+  const pulse = 0.82 + 0.17 * Math.sin(frameCount * 0.027 + id * 0.67)
+                      + 0.10 * Math.sin(frameCount * 0.071 + id * 1.31);
+  amount *= pulse;
+  amount *= 1 - 0.23 * (1 - smooth(22, 90, dz));
+  return clamp(amount, 0, 0.97);
+}
+
+function drawSedimentFragments() {
+  const ctx = drawingContext;
+  const selected = [];
+  for (const fragment of sedimentFragments) {
+    const p = project(fragment.x, fragment.y, fragment.z);
+    if (!p || p.x < -100 || p.x > width + 100 || p.y < -50 || p.y > height + 50) continue;
+    const proximity = 1 - smooth(12, 34, Math.abs(viewer.y - fragment.y));
+    const opacity = depthOpacity(p.dz) * proximity * (0.28 + fragment.tone * 0.32);
+    if (opacity < 0.022) continue;
+    selected.push({ fragment, p, opacity });
+  }
+  selected.sort((a, b) => a.p.dz - b.p.dz);
+  const toRender = selected.slice(0, 66).sort((a, b) => b.p.dz - a.p.dz);
+  visibleSediment = toRender.length;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  for (const {fragment, p, opacity} of toRender) {
+    const size = clamp(11 * 108 / p.dz, 7, 22);
+    const amount = scrambleAmount(fragment.y, fragment.id, p.dz, true);
+    const text = corruptText(fragment.line, amount, fragment.id, 0);
+    const microShift = scrambleEnabled ? Math.sin(frameCount * 0.17 + fragment.phase) * amount * 2.2 : 0;
+    ctx.font = `${size}px monospace`;
+    ctx.fillStyle = `rgba(188,193,150,${opacity.toFixed(3)})`;
+    ctx.fillText(text, p.x + microShift, p.y);
+  }
+}
+
+function drawFragments() {
+  const ctx = drawingContext;
+  const candidates = fragments.map(fragment => {
+    const p = project(fragment.x, fragment.y, fragment.z);
+    if (!p) return null;
+    const vertical = 1 - smooth(34, 69, Math.abs(fragment.y - viewer.y));
+    const centre = 1 - 0.76 * smooth(width * 0.16, width * 0.57, Math.abs(p.x - width * 0.5));
+    const opacity = depthOpacity(p.dz) * vertical * centre;
+    const size = clamp(13 * 108 / p.dz, 7, 31);
+    const lineHeight = size * 1.45;
+    const longest = Math.max(...fragment.lines.map(s => s.length));
+    const box = {
+      left: p.x - longest * size * 0.32 - 12,
+      right: p.x + longest * size * 0.32 + 12,
+      top: p.y - fragment.lines.length * lineHeight * 0.5 - 10,
+      bottom: p.y + fragment.lines.length * lineHeight * 0.5 + 10
+    };
+    return { fragment, p, opacity, size, lineHeight, box };
+  }).filter(o => o && o.opacity >= 0.08 &&
+    o.p.x > -180 && o.p.x < width + 180 &&
+    o.p.y > -110 && o.p.y < height + 110)
+    .sort((a, b) => b.opacity - a.opacity);
+
+  const selected = [];
+  for (const c of candidates) {
+    if (selected.length >= 7) break;
+    const overlap = selected.some(s =>
+      c.box.left < s.box.right && c.box.right > s.box.left &&
+      c.box.top < s.box.bottom && c.box.bottom > s.box.top);
+    if (!overlap) selected.push(c);
+  }
+  selected.sort((a, b) => b.p.dz - a.p.dz);
+  visibleFragments = selected.length;
+
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  for (const { fragment, p, opacity, size, lineHeight } of selected) {
+    const firstLineY = p.y - (fragment.lines.length - 1) * lineHeight * 0.5;
+    ctx.font = `${size}px monospace`;
+    ctx.fillStyle = `rgba(188,229,205,${(opacity * 0.92).toFixed(3)})`;
+    const amount = scrambleAmount(fragment.y, fragment.id, p.dz, false);
+    for (let i = 0; i < fragment.lines.length; i++) {
+      const text = corruptText(fragment.lines[i], amount, fragment.id, i);
+      const shift = scrambleEnabled ? Math.sin(frameCount * 0.13 + fragment.id * 2.7 + i) * amount * 4 : 0;
+      ctx.fillText(text, p.x + shift, firstLineY + i * lineHeight);
+    }
+  }
+}
+
+function drawFloorGrid() {
+  const ctx = drawingContext;
+  ctx.lineWidth = 0.7;
+  for (let z = 0; z <= POND.length; z += 25) {
+    const a = project(0, 100, z);
+    const b = project(200, 100, z);
+    if (a && b) drawProjectedLine(ctx, a, b);
+  }
+  for (let x = 0; x <= 200; x += 20) {
+    for (let z = 0; z < POND.length; z += 25) {
+      const a = project(x, 100, z);
+      const b = project(x, 100, z + 25);
+      if (a && b) drawProjectedLine(ctx, a, b);
+    }
+  }
+}
+
+function drawProjectedLine(ctx, a, b) {
+  const opacity = 0.15 * depthOpacity((a.dz + b.dz) * 0.5);
+  if (opacity < 0.008) return;
+  ctx.strokeStyle = `rgba(116,183,153,${opacity.toFixed(3)})`;
+  ctx.beginPath();
+  ctx.moveTo(a.x, a.y);
+  ctx.lineTo(b.x, b.y);
+  ctx.stroke();
+}
+
+function drawInterface() {
+  const ctx = drawingContext;
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'alphabetic';
+  ctx.font = '11px monospace';
+  ctx.fillStyle = 'rgba(185,229,209,0.72)';
+  ctx.fillText('POND   /   ITERATION 03   /   IMAGE SEDIMENT', 20, 28);
+  ctx.fillStyle = 'rgba(166,200,186,0.50)';
+  ctx.fillText(`X ${Math.round(viewer.x)}/200   DEPTH ${Math.round(viewer.y)}/100   LENGTH ${Math.round(viewer.z)}/500`, 20, 47);
+  ctx.fillText(`FOG ${fogEnabled ? 'ON ' + fogDistance : 'OFF ' + FAR}cm   [ / ] adjust   F toggle   /   ${Math.round(fpsEstimate)} fps`, 20, height - 93);
+  ctx.fillText(`TEXT ${visibleFragments}   SEDIMENT ${visibleSediment}   MOTILE LETTERS ${visibleParticles}  (${visibleDeepParticles} deep)`, 20, height - 75);
+  const imageLine = uploadedImages.length
+    ? `IMAGES ${uploadedImages.length}   ACTIVE ${shortName(imageState.currentName)}   STRENGTH ${currentImageStrength.toFixed(2)}`
+    : 'IMAGES 0   Use the upload button or press U to add images';
+  ctx.fillText(imageLine, 20, height - 57);
+  ctx.fillText('← → rotate    ↑ ↓ forward/back    Q rise    E sink    SHIFT faster', 20, height - 39);
+  ctx.fillText('T glitch    N bed layer    U upload    I images    H interface    G grid    R reset', 20, height - 22);
+
+  const gx = width - 25, gy = 190, gh = Math.max(65, Math.min(160, height - 290));
+  ctx.strokeStyle = 'rgba(172,208,191,0.32)';
+  ctx.strokeRect(gx, gy, 7, gh);
+  ctx.fillStyle = 'rgba(169,145,93,0.22)';
+  ctx.fillRect(gx + 1, gy + gh * 0.9, 5, gh * 0.1 - 1);
+  ctx.fillStyle = '#dce9cb';
+  ctx.fillRect(gx - 3, gy + gh * viewer.y / 100 - 1, 13, 2);
+  ctx.fillStyle = 'rgba(166,200,186,0.5)';
+  ctx.fillText('0', gx - 11, gy - 6);
+  ctx.fillText('100', gx - 25, gy + gh + 13);
+
+  const mx = width - 95, my = 24, mw = 58, mh = 125;
+  ctx.fillStyle = 'rgba(2,11,11,0.53)';
+  ctx.fillRect(mx - 10, my - 8, mw + 20, mh + 34);
+  ctx.strokeStyle = 'rgba(172,208,191,0.35)';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(mx, my, mw, mh);
+  for (const f of fragments) {
+    const x = mx + f.x / POND.width * mw;
+    const y = my + f.z / POND.length * mh;
+    ctx.fillStyle = f.y >= SEDIMENT_START ? 'rgba(188,166,112,0.20)' : 'rgba(155,199,168,0.24)';
+    ctx.fillRect(x - 1, y - 1, 2, 2);
+  }
+  if (uploadedImages.length) {
+    for (const zone of imageZones) {
+      const zx = mx + zone.x / POND.width * mw;
+      const zy = my + zone.z / POND.length * mh;
+      const zw = zone.rx / POND.width * mw;
+      const zh = zone.rz / POND.length * mh;
+      const active = zone.imageIndex === activeImageIndex;
+      ctx.strokeStyle = active ? 'rgba(223,232,190,0.74)' : 'rgba(138,179,168,0.34)';
+      ctx.strokeRect(zx - zw * 0.5, zy - zh * 0.5, zw, zh);
+      ctx.fillStyle = active ? 'rgba(223,232,190,0.74)' : 'rgba(138,179,168,0.34)';
+      ctx.fillRect(zx - 2, zy - 2, 4, 4);
+    }
+  }
+  ctx.fillStyle = '#e0e9ce';
+  ctx.beginPath();
+  ctx.arc(mx + viewer.x / POND.width * mw, my + viewer.z / POND.length * mh, 3, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = 'rgba(166,200,186,0.5)';
+  ctx.fillText('PLAN', mx + 15, my + mh + 16);
+}
+
+function shortName(name) {
+  if (!name || name === 'none') return 'none';
+  return name.length > 28 ? name.slice(0, 25) + '...' : name;
+}
+
+function keyPressed() {
+  if (key === 'f' || key === 'F') fogEnabled = !fogEnabled;
+  if (key === '[') { fogDistance = clamp(fogDistance - 20, MIN_FOG, FAR); fogEnabled = true; }
+  if (key === ']') { fogDistance = clamp(fogDistance + 20, MIN_FOG, FAR); fogEnabled = true; }
+  if (key === 't' || key === 'T') scrambleEnabled = !scrambleEnabled;
+  if (key === 'n' || key === 'N') sedimentEnabled = !sedimentEnabled;
+  if (key === 'i' || key === 'I') imagesEnabled = !imagesEnabled;
+  if (key === 'u' || key === 'U') { if (uploadInput) uploadInput.click(); }
+  if (key === 'h' || key === 'H') showHUD = !showHUD;
+  if (key === 'g' || key === 'G') showGrid = !showGrid;
+  if (key === 'r' || key === 'R') viewer = { x: 100, y: 64, z: 10, yaw: 0, vx: 0, vy: 0, vz: 0 };
+  if ([37, 38, 39, 40, 32].includes(keyCode)) return false;
+}
+
+function windowResized() {
+  resizeCanvas(windowWidth, windowHeight);
+}
+
+function smooth(a, b, x) {
+  const t = clamp((x - a) / (b - a), 0, 1);
+  return t * t * (3 - 2 * t);
+}
+function clamp(n, a, b) { return Math.max(a, Math.min(b, n)); }
+function wrap(x, limit) { return (x % limit + limit) % limit; }
+function mix(a, b, t) { return a + (b - a) * t; }
+function seededRandom(seed) {
+  return function() {
+    seed |= 0;
+    seed = seed + 0x6D2B79F5 | 0;
+    let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+    t ^= t + Math.imul(t ^ t >>> 7, 61 | t);
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+</script>
+<script>
+if(typeof setup==='function') setup();
+let last = performance.now();
+function loop(now){
+ deltaTime = now - last; last = now; frameCount++;
+ if(typeof draw==='function') draw();
+ requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script></body></html>

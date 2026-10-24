@@ -1,0 +1,406 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>POND / Fog / Iteration 01b</title>
+<style>html,body{margin:0;width:100%;height:100%;background:#061512;overflow:hidden}canvas{display:block;width:100%;height:100%}</style></head><body><canvas aria-label="Navigable pond of text fragments"></canvas>
+
+<script>
+// A tiny Canvas adapter, only to make this specific p5 sketch playable offline.
+// The supplied sketch.js is the native p5.js version to paste into the editor.
+let width=0, height=0, drawingContext=null, deltaTime=16.667, frameCount=0;
+let windowWidth=window.innerWidth, windowHeight=window.innerHeight;
+let key='', keyCode=0;
+const activeKeys = new Set();
+const LEFT_ARROW=37, UP_ARROW=38, RIGHT_ARROW=39, DOWN_ARROW=40;
+function createCanvas(w,h){
+ const canvas=document.querySelector('canvas');
+ canvas.width=width=w; canvas.height=height=h;
+ drawingContext=canvas.getContext('2d');
+ return canvas;
+}
+function resizeCanvas(w,h){
+ const canvas=document.querySelector('canvas');
+ canvas.width=width=w;canvas.height=height=h;
+}
+function pixelDensity(n) {}
+function keyIsDown(code){ return activeKeys.has(code); }
+window.addEventListener('keydown',e=>{
+ activeKeys.add(e.keyCode); key=e.key;keyCode=e.keyCode;
+ if(!e.repeat && typeof keyPressed==='function') keyPressed();
+ if ([37,38,39,40,32].includes(e.keyCode)) e.preventDefault();
+});
+window.addEventListener('keyup',e=>activeKeys.delete(e.keyCode));
+window.addEventListener('blur',()=>activeKeys.clear());
+window.addEventListener('resize',()=>{
+ windowWidth=innerWidth;windowHeight=innerHeight;
+ if(typeof windowResized==='function') windowResized();
+});
+</script>
+<script>// POND / Iteration 01b: Fog + render-distance controls
+// Paste everything into https://editor.p5js.org/ (sketch.js)
+// Controls: left/right rotate, up/down move through the pond, Q = rise, E = sink, Shift = faster.
+// F = toggle fog, [ ] = adjust visible distance. H = HUD, G = grid.
+// The prompts below are temporary examples, not the Oracle database.
+
+const POND = { width: 200, length: 500, depth: 100 };
+const NEAR = 14;
+const ROTATION_SPEED = 0.035;
+const FAR = 320; // Maximum visibility when fog is switched off.
+let fogEnabled = true;
+let fogDistance = 145; // Default visible distance. Change this to taste.
+const MIN_FOG = 70;
+let visibleParticles = 0;
+let visibleFragments = 0;
+let fpsEstimate = 60;
+
+function renderLimit() { return fogEnabled ? fogDistance : FAR; }
+
+const PROMPTS = [
+  'What is growing\nbeneath this surface?',
+  'Where does the structure\nbecome an environment?',
+  'What moves too slowly\nto be noticed?',
+  'What holds this place\ntogether?',
+  'Look towards the\noverlooked edge.',
+  'Who maintains\nthis boundary?',
+  'Which traces belong\nto more than one life?',
+  'Where might the\nwater have travelled?',
+  'What gathers in\nthe spaces between?',
+  'Can a surface\nremember contact?',
+  'What forms of attention\ndoes this place invite?',
+  'What remains hidden\nin plain sight?',
+  'How does time\naccumulate here?',
+  'What is the smallest\nchange you can detect?',
+  'Where does decay\nbecome material?',
+  'Which relationships\nare easily overlooked?',
+  'Where does one\nsystem become another?',
+  'What can be sensed\nwithout being seen?',
+  'How is this place\nbeing remade?',
+  'What lives alongside\nthe infrastructure?',
+  'Who or what passes\nthrough this site?',
+  'What is carried\nby the surface?',
+  'Where does the\nsediment settle?',
+  'What might interrupt\nthis arrangement?',
+  'Which materials\nare in motion?',
+  'How does the site\nshape your attention?',
+  'What has been\nleft undisturbed?',
+  'What might emerge\nif you wait?'
+];
+
+let viewer = { x: 100, y: 64, z: 10, yaw: 0, vx: 0, vy: 0, vz: 0 };
+let fragments = [];
+let particles = [];
+let showHUD = true;
+let showGrid = false;
+let random01;
+
+function setup() {
+  createCanvas(windowWidth, windowHeight);
+  pixelDensity(1);
+  random01 = seededRandom(13972);
+  initialisePond();
+}
+
+function initialisePond() {
+  // Place several fragments along the initial line of sight, then fill
+  // the entire volume with fixed-position fragments.
+  const anchors = [
+    { x: 100, y: 61, z: 106 },
+    { x: 76, y: 80, z: 161 },
+    { x: 132, y: 49, z: 203 },
+    { x: 97, y: 90, z: 248 },
+    { x: 126, y: 73, z: 310 },
+    { x: 74, y: 58, z: 383 }
+  ];
+  fragments = PROMPTS.map((content, i) => {
+    const position = i < anchors.length ? anchors[i] : {
+      x: 15 + random01() * 170,
+      y: 34 + Math.pow(random01(), 0.6) * 63,
+      z: 32 + random01() * 446
+    };
+    return { ...position, lines: content.split('\n'), id: i };
+  });
+
+  const alphabet = '._-:;+/\\|*?()[]{}~abcdefghijklmnopqrstuvwxyz';
+  particles = Array.from({ length: 230 }, (_, i) => ({
+    x: random01() * POND.width,
+    y: 15 + random01() * 85,
+    z: random01() * POND.length,
+    vx: (random01() - 0.5) * 0.2,
+    vy: (random01() - 0.5) * 0.1,
+    vz: (random01() - 0.5) * 0.2,
+    char: alphabet[Math.floor(random01() * alphabet.length)],
+    bright: random01(),
+    dart: 0,
+    id: i
+  }));
+}
+
+function draw() {
+  const dt = Math.min(2.1, Math.max(0.1, deltaTime / 16.667));
+  fpsEstimate = fpsEstimate * 0.93 + (1000 / Math.max(deltaTime, 1)) * 0.07;
+  moveViewer(dt);
+  moveParticles(dt);
+  paintWater();
+  if (showGrid) drawFloorGrid();
+  drawParticles();
+  drawFragments();
+  if (showHUD) drawInterface();
+}
+
+function moveViewer(dt) {
+  const fast = keyIsDown(16) ? 2.5 : 1;
+  const speed = 0.66 * fast;
+  const turn = Number(keyIsDown(39)) - Number(keyIsDown(37));
+  let dx = 0;
+  let dz = Number(keyIsDown(38)) - Number(keyIsDown(40));
+  let dy = Number(keyIsDown(69)) - Number(keyIsDown(81)); // E lower, Q rise
+  const magnitude = Math.hypot(dx, dy, dz) || 1;
+  dx /= magnitude;
+  dy /= magnitude;
+  dz /= magnitude;
+
+  const ease = 1 - Math.pow(0.78, dt);
+  viewer.yaw += turn * ROTATION_SPEED * fast * dt;
+  viewer.vx += (dx * speed - viewer.vx) * ease;
+  viewer.vy += (dy * speed * 0.65 - viewer.vy) * ease;
+  viewer.vz += (dz * speed - viewer.vz) * ease;
+
+  viewer.x = clamp(viewer.x + viewer.vx * dt, 4, 196);
+  viewer.y = clamp(viewer.y + viewer.vy * dt, 5, 96);
+  viewer.z = clamp(viewer.z + viewer.vz * dt, 0, 492);
+}
+
+function moveParticles(dt) {
+  // This subtle movement is only environmental detail. Movement-driven
+  // turbulence and prompt scrambling belong to the next prototype.
+  for (const p of particles) {
+    p.vx = p.vx * 0.978 + (Math.random() - 0.5) * 0.018 * dt;
+    p.vy = p.vy * 0.978 + (Math.random() - 0.5) * 0.012 * dt;
+    p.vz = p.vz * 0.978 + (Math.random() - 0.5) * 0.018 * dt;
+    if (Math.random() < 0.00075 * dt) {
+      p.vx += (Math.random() - 0.5) * 2.6;
+      p.vy += (Math.random() - 0.5) * 1.7;
+      p.vz += (Math.random() - 0.5) * 2.6;
+      p.dart = 18;
+    }
+    p.x = wrap(p.x + p.vx * dt, POND.width);
+    p.y = clamp(p.y + p.vy * dt, 3, 99);
+    p.z = wrap(p.z + p.vz * dt, POND.length);
+    p.dart = Math.max(0, p.dart - dt);
+  }
+}
+
+function paintWater() {
+  const ctx = drawingContext;
+  const bg = ctx.createLinearGradient(0, 0, 0, height);
+  bg.addColorStop(0, '#071718');
+  bg.addColorStop(0.58, '#081c1a');
+  bg.addColorStop(1, '#0b1715');
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, width, height);
+  // Gentle edge darkness to imply a restricted cone of visibility.
+  const fog = ctx.createRadialGradient(width * 0.5, height * 0.48, 10,
+    width * 0.5, height * 0.48, Math.max(width, height) * 0.65);
+  fog.addColorStop(0, 'rgba(0,0,0,0)');
+  fog.addColorStop(1, 'rgba(0,0,0,0.46)');
+  ctx.fillStyle = fog;
+  ctx.fillRect(0, 0, width, height);
+}
+
+function project(x, y, z) {
+  const offsetX = x - viewer.x;
+  const offsetZ = z - viewer.z;
+  const sinYaw = Math.sin(viewer.yaw);
+  const cosYaw = Math.cos(viewer.yaw);
+  const cameraX = offsetX * cosYaw - offsetZ * sinYaw;
+  const dz = offsetX * sinYaw + offsetZ * cosYaw;
+  if (dz < NEAR || dz > renderLimit()) return null;
+  const focal = Math.min(width, height) * 0.88;
+  const factor = focal / dz;
+  return {
+    x: width * 0.5 + cameraX * factor,
+    y: height * 0.48 + (y - viewer.y) * factor,
+    dz,
+    factor
+  };
+}
+
+function depthOpacity(dz) {
+  const nearFade = smooth(NEAR, 38, dz);
+  // Objects fade to zero BEFORE the render limit. They are then culled,
+  // rather than drawn invisibly. Fog is opacity, not a costly blur filter.
+  const fadeStart = fogEnabled ? Math.max(35, fogDistance * 0.39) : 145;
+  const farFade = 1 - smooth(fadeStart, renderLimit(), dz);
+  return nearFade * farFade;
+}
+
+function drawParticles() {
+  const ctx = drawingContext;
+  const sorted = particles.map(particle => ({
+    particle,
+    projection: project(particle.x, particle.y, particle.z)
+  })).filter(entry => entry.projection)
+    .sort((a, b) => b.projection.dz - a.projection.dz);
+  visibleParticles = 0;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  for (const { particle, projection: p } of sorted) {
+    if (!p || p.x < -30 || p.x > width + 30 || p.y < -30 || p.y > height + 30) continue;
+    const opacity = depthOpacity(p.dz) * (0.08 + 0.28 * particle.bright);
+    if (opacity < 0.008) continue;
+    const size = clamp(9 * 100 / p.dz, 5, 20);
+    ctx.font = `${size}px monospace`;
+    ctx.fillStyle = `rgba(154,208,187,${opacity.toFixed(3)})`;
+    ctx.fillText(particle.char, p.x, p.y);
+    visibleParticles++;
+    if (particle.dart > 0 && p.dz < 115) {
+      ctx.strokeStyle = `rgba(154,208,187,${(opacity * 0.28).toFixed(3)})`;
+      ctx.lineWidth = 0.7;
+      ctx.beginPath();
+      ctx.moveTo(p.x, p.y);
+      ctx.lineTo(p.x - particle.vx * p.factor * 4,
+                 p.y - particle.vy * p.factor * 4);
+      ctx.stroke();
+    }
+  }
+}
+
+function drawFragments() {
+  const ctx = drawingContext;
+  // An attention window prevents every fragment in the database being
+  // simultaneously readable. Give nearer, more central material priority.
+  const candidates = fragments.map(fragment => {
+    const p = project(fragment.x, fragment.y, fragment.z);
+    if (!p) return null;
+    const vertical = 1 - smooth(34, 69, Math.abs(fragment.y - viewer.y));
+    const centre = 1 - 0.76 * smooth(width * 0.16, width * 0.57,
+      Math.abs(p.x - width * 0.5));
+    const opacity = depthOpacity(p.dz) * vertical * centre;
+    const size = clamp(13 * 108 / p.dz, 7, 31);
+    const lineHeight = size * 1.45;
+    const longest = Math.max(...fragment.lines.map(s => s.length));
+    const box = {
+      left: p.x - longest * size * 0.32 - 12,
+      right: p.x + longest * size * 0.32 + 12,
+      top: p.y - fragment.lines.length * lineHeight * 0.5 - 10,
+      bottom: p.y + fragment.lines.length * lineHeight * 0.5 + 10
+    };
+    return { fragment, p, opacity, size, lineHeight, box };
+  }).filter(o => o && o.opacity >= 0.08 &&
+    o.p.x > -180 && o.p.x < width + 180 &&
+    o.p.y > -110 && o.p.y < height + 110)
+    .sort((a, b) => b.opacity - a.opacity);
+
+  const selected = [];
+  for (const c of candidates) {
+    if (selected.length >= 7) break;
+    // Avoid layering fully readable sentences on top of one another.
+    const overlap = selected.some(s =>
+      c.box.left < s.box.right && c.box.right > s.box.left &&
+      c.box.top < s.box.bottom && c.box.bottom > s.box.top);
+    if (!overlap) selected.push(c);
+  }
+  selected.sort((a, b) => b.p.dz - a.p.dz);
+  visibleFragments = selected.length;
+
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  for (const { fragment, p, opacity, size, lineHeight } of selected) {
+    const firstLineY = p.y - (fragment.lines.length - 1) * lineHeight * 0.5;
+    ctx.font = `${size}px monospace`;
+    ctx.fillStyle = `rgba(188,229,205,${(opacity * 0.92).toFixed(3)})`;
+    for (let i = 0; i < fragment.lines.length; i++) {
+      ctx.fillText(fragment.lines[i], p.x, firstLineY + i * lineHeight);
+    }
+  }
+}
+
+function drawFloorGrid() {
+  const ctx = drawingContext;
+  ctx.lineWidth = 0.7;
+  for (let z = 0; z <= POND.length; z += 25) {
+    const a = project(0, 100, z);
+    const b = project(200, 100, z);
+    if (a && b) drawProjectedLine(ctx, a, b);
+  }
+  for (let x = 0; x <= 200; x += 20) {
+    for (let z = 0; z < POND.length; z += 25) {
+      const a = project(x, 100, z);
+      const b = project(x, 100, z + 25);
+      if (a && b) drawProjectedLine(ctx, a, b);
+    }
+  }
+}
+
+function drawProjectedLine(ctx, a, b) {
+  const opacity = 0.15 * depthOpacity((a.dz + b.dz) * 0.5);
+  if (opacity < 0.008) return;
+  ctx.strokeStyle = `rgba(116,183,153,${opacity.toFixed(3)})`;
+  ctx.beginPath();
+  ctx.moveTo(a.x, a.y);
+  ctx.lineTo(b.x, b.y);
+  ctx.stroke();
+}
+
+function drawInterface() {
+  const ctx = drawingContext;
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'alphabetic';
+  ctx.font = '11px monospace';
+  ctx.fillStyle = 'rgba(185,229,209,0.72)';
+  ctx.fillText('POND   /   ITERATION 01b   /   FOG', 20, 28);
+  ctx.fillStyle = 'rgba(166,200,186,0.50)';
+  ctx.fillText(`X ${Math.round(viewer.x)}/200   DEPTH ${Math.round(viewer.y)}/100   LENGTH ${Math.round(viewer.z)}/500`, 20, 47);
+  ctx.fillText(`FOG ${fogEnabled ? 'ON ' + fogDistance : 'OFF ' + FAR}cm   [ less visibility   ] more visibility   F toggle   /   ${visibleFragments} text   ${visibleParticles} particles   ${Math.round(fpsEstimate)}fps`, 20, height - 57);
+  ctx.fillText('← → rotate    ↑ ↓ through    Q rise    E sink    SHIFT faster', 20, height - 39);
+  ctx.fillText('H interface    G floor grid    R reset      /      fixed text in a navigable volume', 20, height - 22);
+
+  // A small development aid: plan view, with dots for text anchors.
+  const mx = width - 84, my = 24, mw = 48, mh = 125;
+  ctx.fillStyle = 'rgba(2,11,11,0.53)';
+  ctx.fillRect(mx - 9, my - 8, mw + 18, mh + 34);
+  ctx.strokeStyle = 'rgba(172,208,191,0.35)';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(mx, my, mw, mh);
+  for (const f of fragments) {
+    const x = mx + f.x / POND.width * mw;
+    const y = my + f.z / POND.length * mh;
+    ctx.fillStyle = 'rgba(155,199,168,0.33)';
+    ctx.fillRect(x - 1, y - 1, 2, 2);
+  }
+  ctx.fillStyle = '#e0e9ce';
+  ctx.beginPath();
+  ctx.arc(mx + viewer.x / POND.width * mw, my + viewer.z / POND.length * mh, 3, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = 'rgba(166,200,186,0.5)';
+  ctx.fillText('PLAN', mx + 10, my + mh + 16);
+}
+
+function keyPressed() {
+  if (key === 'f' || key === 'F') fogEnabled = !fogEnabled;
+  if (key === '[') { fogDistance = clamp(fogDistance - 20, MIN_FOG, FAR); fogEnabled = true; }
+  if (key === ']') { fogDistance = clamp(fogDistance + 20, MIN_FOG, FAR); fogEnabled = true; }
+  if (key === 'h' || key === 'H') showHUD = !showHUD;
+  if (key === 'g' || key === 'G') showGrid = !showGrid;
+  if (key === 'r' || key === 'R') viewer = { x: 100, y: 64, z: 10, vx: 0, vy: 0, vz: 0 };
+  if ([37, 38, 39, 40, 32].includes(keyCode)) return false;
+}
+
+function windowResized() {
+  resizeCanvas(windowWidth, windowHeight);
+}
+
+function smooth(a, b, x) {
+  const t = clamp((x - a) / (b - a), 0, 1);
+  return t * t * (3 - 2 * t);
+}
+function clamp(n, a, b) { return Math.max(a, Math.min(b, n)); }
+function wrap(x, limit) { return (x % limit + limit) % limit; }
+function seededRandom(seed) {
+  return function() {
+    seed |= 0;
+    seed = seed + 0x6D2B79F5 | 0;
+    let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+    t ^= t + Math.imul(t ^ t >>> 7, 61 | t);
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+</script>
+<script>setup(); let previous=performance.now();function animate(now){deltaTime=Math.min(100,now-previous); previous=now; frameCount++;draw();requestAnimationFrame(animate);}requestAnimationFrame(animate);</script></body></html>

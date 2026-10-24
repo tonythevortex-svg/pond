@@ -1,0 +1,1550 @@
+  <!doctype html>
+  <html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Minimal Microsound Sequencer / Serial Drum</title>
+    <style>
+      html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #000; }
+      canvas { display: block; }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/p5@1.11.3/lib/p5.min.js"></script>
+  </head>
+  <body>
+  <script>
+  /**
+ * Minimal Microsound Sequencer (p5.js + WebAudio) — 16 tracks + polyrhythms
+ *
+ * UPDATE:
+ *  - per-track clocks (no global bar driving all tracks)
+ *  - changing track length resets THAT track clock => instantly shorter loop
+ *  - added DEEP bass instrument
+ *  - added V / Shift+V to cycle voice on selected track
+ */
+
+const STEPS = 16;
+const NUM_TRACKS = 30;
+
+const POLY_LENS = [5, 7, 9, 11, 13, 16];
+
+let tracks = [];        // objects with voice params
+let pattern = [];       // [t][0..15] 0/1
+let selected = 0;
+
+let bpm = 148;
+let isPlaying = false;
+let serialPort = null;
+let serialReader = null;
+let serialConnected = false;
+let serialStatus = 'OFFLINE';
+let sensorMillivolts = 0;
+let previousSensorMillivolts = null;
+let sensorDeltaMillivolts = 0;
+let sensorLastReadingAt = 0;
+let sensorWatchdog = null;
+let sensorTimedOut = false;
+let serialSampleCount = 0;
+let serialSpikeCount = 0;
+let serialGraphHistory = [];
+let serialGraphCanvas = null;
+let serialGraphContext = null;
+let serialGraphRangeNode = null;
+let serialAutoScale = true;
+let serialTriggerFloor = 250;
+let serialRiseThreshold = 18;
+let serialSignalCenter = 325;
+let serialSignalSpan = 50;
+let serialFlashUntil = 0;
+let soloTrack = -1;
+let soloButton = null;
+let droneButton = null;
+let serialConnectButton = null;
+let serialStatusNode = null;
+let serialValueNode = null;
+let serialDeltaNode = null;
+let serialHitNode = null;
+let droneModNode = null;
+let droneDepthControl = null;
+let droneModulation = 0;
+let droneBaseFrequencies = [];
+let droneBaseFilterFrequency = 210;
+
+// --- scheduling (PER-TRACK) ---
+let ctx;
+let lookaheadMs = 25;
+let scheduleAhead = 0.12;
+let timer = null;
+
+// per-track transport state
+let trackTick = [];       // integer step counter per track (unbounded)
+let trackNextTime = [];   // next step time per track
+let trackStartTime = [];  // (for resets / UI)
+
+// --- master / FX ---
+let master, comp;
+let delay, delaySend, delayFb, delayLP;
+let noiseBuffer;
+
+// --- UI ---
+let scrollRow = 0;
+let grid = {
+  left: 0, top: 0, w: 0, h: 0,
+  labelW: 210,
+  cellW: 0, rowH: 34,
+  headerH: 220,
+  footerH: 58
+};
+
+// --- drone ---
+let droneOn = false;
+let droneMode = 0; // 0 sine/tri, 1 cluster, 2 noise-air
+let drone = { osc: [], amp: null, filt: null, lfo: null, lfoGain: null };
+
+const VOICES = [
+  { name: "TICK",  play: (t, time, step) => vTick(t, time, step) },
+  { name: "PIN",   play: (t, time, step) => vPin(t, time, step) },
+  { name: "BLIP",  play: (t, time, step) => vBlip(t, time, step) },
+  { name: "CHRP",  play: (t, time, step) => vChirpFM(t, time, step) },
+
+  { name: "HAT",   play: (t, time, step) => vHat(t, time, step) },
+  { name: "SNAR",  play: (t, time, step) => vSnare(t, time, step) },
+  { name: "CRKL",  play: (t, time, step) => vCrackle(t, time, step) },
+  { name: "METL",  play: (t, time, step) => vMetal(t, time, step) },
+
+  { name: "SUB",   play: (t, time, step) => vSub(t, time, step) },
+  { name: "BASS",  play: (t, time, step) => vBass(t, time, step) },
+  { name: "PULS",  play: (t, time, step) => vPulse(t, time, step) },
+  { name: "GRN",   play: (t, time, step) => vGrain(t, time, step) },
+
+  { name: "RIM",   play: (t, time, step) => vRim(t, time, step) },
+  { name: "CLAP",  play: (t, time, step) => vClap(t, time, step) },
+  { name: "ZAP",   play: (t, time, step) => vZap(t, time, step) },
+  { name: "BOOM",  play: (t, time, step) => vBoom(t, time, step) },
+
+  // NEW: really deep bass
+  { name: "DEEP",  play: (t, time, step) => vDeepBass(t, time, step) },
+];
+
+function setup() {
+  createCanvas(windowWidth, windowHeight);
+  pixelDensity(1);
+  textFont("monospace");
+
+  // tracks + patterns
+  for (let i = 0; i < NUM_TRACKS; i++) {
+    tracks[i] = {
+      voice: i % VOICES.length,
+      prob: 0.65,
+      level: 0.6,
+      len: 16,
+      phase: 0,
+      enabled: true
+    };
+    pattern[i] = Array.from({ length: STEPS }, () => 0);
+
+    // per-track clocks init
+    trackTick[i] = 0;
+    trackNextTime[i] = 0;
+    trackStartTime[i] = 0;
+  }
+
+  // tasteful default: keep it minimal
+  // quarter ticks
+  tracks[0].prob = 0.95; tracks[0].level = 0.70;
+  pattern[0][0] = 1; pattern[0][4] = 1; pattern[0][8] = 1; pattern[0][12] = 1;
+
+  // a couple sparse events
+  tracks[8].prob = 0.45; tracks[8].level = 0.70; // SUB
+  pattern[8][0] = 1; pattern[8][10] = 1;
+
+  tracks[6].prob = 0.55; tracks[6].level = 0.55; // CRKL
+  pattern[6][7] = 1;
+
+  tracks[2].prob = 0.40; tracks[2].level = 0.55; // BLIP
+  pattern[2][13] = 1;
+
+  // OPTIONAL demo: put DEEP on track 9, keep pattern empty by default
+  // (use V to swap voices quickly)
+  // tracks[9].voice = VOICES.length - 1;
+
+  createSerialControlPanel();
+}
+
+function createSerialControlPanel() {
+  const panel = document.createElement('section');
+  panel.id = 'serial-controls-panel';
+  panel.style.cssText = 'position:fixed;z-index:5;top:10px;right:12px;width:min(470px,calc(100vw - 24px));max-height:56vh;overflow:auto;padding:10px 12px;background:rgba(5,10,12,.92);border:1px solid rgba(180,215,194,.35);color:#dce9df;font:11px monospace;box-sizing:border-box';
+  panel.innerHTML = `
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+      <strong style="color:#c4e982;letter-spacing:.06em">SERIAL / DRONE MOD</strong>
+      <span id="serial-status">OFFLINE</span>
+      <button id="serial-connect">Connect</button>
+      <button id="drone-toggle">Drone off</button>
+      <button id="solo-selected">Solo selected</button>
+    </div>
+    <div style="display:flex;gap:16px;margin:8px 0;color:#9db3a8">
+      <span>INPUT <b id="serial-value" style="color:#e2eee7">0 mV</b></span>
+      <span>DELTA <b id="serial-delta" style="color:#e2eee7">0 mV</b></span>
+      <span>HITS <b id="serial-hits" style="color:#e2eee7">0</b></span>
+      <span>DRONE MOD <b id="drone-mod" style="color:#e2eee7">0%</b></span>
+    </div>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin:5px 0;color:#9db3a8">
+      <label><input id="serial-autoscale" type="checkbox" checked> Autoscale graph</label>
+      <span id="serial-graph-range">Waiting for data</span>
+    </div>
+    <canvas id="serial-graph" aria-label="Live voltage graph" style="display:block;width:100%;height:104px;background:#091114;border:1px solid rgba(180,215,194,.2)"></canvas>
+    <div id="serial-control-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:5px 14px"></div>
+    <div style="margin-top:6px;color:#8da69a">U connect. H/J center, K/L span, G/Y floor, N/M rise. S solo selected.</div>`;
+  document.body.appendChild(panel);
+
+  serialStatusNode = panel.querySelector('#serial-status');
+  serialValueNode = panel.querySelector('#serial-value');
+  serialDeltaNode = panel.querySelector('#serial-delta');
+  serialHitNode = panel.querySelector('#serial-hits');
+  droneModNode = panel.querySelector('#drone-mod');
+  serialGraphCanvas = panel.querySelector('#serial-graph');
+  serialGraphContext = serialGraphCanvas.getContext('2d');
+  serialGraphRangeNode = panel.querySelector('#serial-graph-range');
+  panel.querySelector('#serial-autoscale').addEventListener('change', event => {
+    serialAutoScale = event.target.checked;
+    drawSerialGraph();
+  });
+  serialConnectButton = panel.querySelector('#serial-connect');
+  droneButton = panel.querySelector('#drone-toggle');
+  soloButton = panel.querySelector('#solo-selected');
+  serialConnectButton.onclick = () => {
+    armAudio();
+    toggleSerialConnection();
+  };
+  droneButton.onclick = () => { armAudio(); toggleDrone(); };
+  soloButton.onclick = toggleSoloSelected;
+
+  const controls = panel.querySelector('#serial-control-grid');
+  serialCenterControl = addSerialRange(controls, 'Signal center', 0, 400, 1, serialSignalCenter, value => { serialSignalCenter = value; }, 'Neutral voltage where drone modulation crosses zero.');
+  serialSpanControl = addSerialRange(controls, 'Signal span', 5, 200, 5, serialSignalSpan, value => { serialSignalSpan = value; }, 'mV width mapped across drone pitch and hit variation; smaller is more sensitive.');
+  serialFloorControl = addSerialRange(controls, 'Trigger floor', 0, 400, 5, serialTriggerFloor, value => { serialTriggerFloor = value; }, 'Minimum voltage allowed to trigger a drum hit.');
+  serialRiseControl = addSerialRange(controls, 'Spike threshold', 1, 100, 1, serialRiseThreshold, value => { serialRiseThreshold = value; }, 'Minimum upward mV jump required for a hit.');
+  droneDepthControl = addSerialRange(controls, 'Drone depth', 0, 100, 1, 24, value => { droneDepthControl.dataset.depth = value; }, 'How strongly voltage changes drone pitch, filter, and motion.');
+  grid.headerH = Math.max(128, panel.offsetHeight + 20);
+  updateSerialPanel();
+  updateDroneButton();
+  updateSoloButton();
+}
+
+function addSerialRange(parent, label, minValue, maxValue, step, initial, onChange, explanation = '') {
+  const row = document.createElement('label');
+  row.style.cssText = 'display:grid;grid-template-columns:1fr auto;gap:2px 8px;align-items:center;color:#aabdb3;margin-bottom:3px';
+  const name = document.createElement('span');
+  name.textContent = label;
+  const output = document.createElement('span');
+  output.textContent = String(initial);
+  output.style.color = '#e2eee7';
+  const input = document.createElement('input');
+  input.type = 'range';
+  input.min = String(minValue);
+  input.max = String(maxValue);
+  input.step = String(step);
+  input.value = String(initial);
+  input.style.cssText = 'grid-column:1/-1;width:100%;margin:0;accent-color:#c4e982';
+  input.addEventListener('input', () => {
+    const value = Number(input.value);
+    output.textContent = String(value);
+    onChange(value);
+  });
+  row.append(name, output, input);
+  if (explanation) {
+    const help = document.createElement('small');
+    help.textContent = explanation;
+    help.style.cssText = 'grid-column:1/-1;color:#82998e;font-size:9px;line-height:1.25';
+    row.appendChild(help);
+  }
+  parent.appendChild(row);
+  return input;
+}
+
+function updateSerialPanel() {
+  if (!serialStatusNode) return;
+  serialStatusNode.textContent = serialStatus;
+  serialStatusNode.style.color = serialConnected && !sensorTimedOut ? '#c4e982' : '#e5847d';
+  serialValueNode.textContent = `${Math.round(sensorMillivolts)} mV`;
+  serialDeltaNode.textContent = `${sensorDeltaMillivolts > 0 ? '+' : ''}${sensorDeltaMillivolts} mV`;
+  serialHitNode.textContent = String(serialSpikeCount);
+  serialConnectButton.textContent = serialPort ? 'Disconnect' : 'Connect';
+}
+
+function drawSerialGraph() {
+  if (!serialGraphCanvas || !serialGraphContext) return;
+  const cssWidth = Math.max(1, serialGraphCanvas.clientWidth);
+  const cssHeight = Math.max(1, serialGraphCanvas.clientHeight);
+  const pixelRatio = Math.min(2, window.devicePixelRatio || 1);
+  const targetWidth = Math.round(cssWidth * pixelRatio);
+  const targetHeight = Math.round(cssHeight * pixelRatio);
+  if (serialGraphCanvas.width !== targetWidth || serialGraphCanvas.height !== targetHeight) {
+    serialGraphCanvas.width = targetWidth;
+    serialGraphCanvas.height = targetHeight;
+  }
+
+  const context = serialGraphContext;
+  context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+  context.clearRect(0, 0, cssWidth, cssHeight);
+  context.fillStyle = '#091114';
+  context.fillRect(0, 0, cssWidth, cssHeight);
+  const samples = serialGraphHistory.slice(-180);
+  let low = serialSignalCenter - serialSignalSpan * 0.5;
+  let high = serialSignalCenter + serialSignalSpan * 0.5;
+
+  if (serialAutoScale && samples.length) {
+    const values = samples.map(sample => sample.value);
+    const minimum = Math.min(...values);
+    const maximum = Math.max(...values);
+    const padding = Math.max(2, (maximum - minimum) * 0.16);
+    low = Math.max(0, minimum - padding);
+    high = Math.min(400, maximum + padding);
+    if (high - low < 8) {
+      const midpoint = (high + low) * 0.5;
+      low = Math.max(0, midpoint - 4);
+      high = Math.min(400, midpoint + 4);
+    }
+  }
+  if (high - low < 1) high = low + 1;
+  serialGraphRangeNode.textContent = `${serialAutoScale ? 'AUTO' : 'MANUAL'} ${Math.round(low)}-${Math.round(high)} mV`;
+
+  const left = 34;
+  const right = cssWidth - 8;
+  const top = 8;
+  const bottom = cssHeight - 8;
+  context.font = '9px monospace';
+  context.textAlign = 'right';
+  context.textBaseline = 'middle';
+  for (let division = 0; division <= 2; division++) {
+    const fraction = division / 2;
+    const y = top + fraction * (bottom - top);
+    context.strokeStyle = 'rgba(157,179,168,0.17)';
+    context.beginPath();
+    context.moveTo(left, y);
+    context.lineTo(right, y);
+    context.stroke();
+    context.fillStyle = '#9db3a8';
+    context.fillText(String(Math.round(high - fraction * (high - low))), left - 5, y);
+  }
+
+  const floorY = bottom - (serialTriggerFloor - low) / (high - low) * (bottom - top);
+  if (floorY >= top && floorY <= bottom) {
+    context.setLineDash([3, 4]);
+    context.strokeStyle = 'rgba(237,170,114,0.65)';
+    context.beginPath();
+    context.moveTo(left, floorY);
+    context.lineTo(right, floorY);
+    context.stroke();
+    context.setLineDash([]);
+  }
+
+  if (!samples.length) return;
+  context.beginPath();
+  samples.forEach((sample, index) => {
+    const x = left + index / Math.max(1, samples.length - 1) * (right - left);
+    const y = bottom - (sample.value - low) / (high - low) * (bottom - top);
+    if (index === 0) context.moveTo(x, y);
+    else context.lineTo(x, y);
+  });
+  context.strokeStyle = '#c4e982';
+  context.lineWidth = 1.5;
+  context.stroke();
+}
+
+function updateDroneButton() {
+  if (droneButton) droneButton.textContent = droneOn ? 'Drone on' : 'Drone off';
+}
+
+function toggleSoloSelected() {
+  soloTrack = soloTrack === selected ? -1 : selected;
+  updateSoloButton();
+}
+
+function updateSoloButton() {
+  if (soloButton) soloButton.textContent = soloTrack >= 0 ? `Unsolo ${String(soloTrack + 1).padStart(2, '0')}` : 'Solo selected';
+}
+
+function windowResized() {
+  resizeCanvas(windowWidth, windowHeight);
+  const panel = document.querySelector('#serial-controls-panel');
+  if (panel) grid.headerH = Math.max(128, panel.offsetHeight + 20);
+}
+
+function draw() {
+  background(0);
+  layoutUI();
+  drawSerialGraph();
+
+  // header
+  fill(255);
+  noStroke();
+  textSize(12);
+  const status = isPlaying ? "PLAY" : "STOP";
+  const tr = tracks[selected];
+  const vname = VOICES[tr.voice].name;
+  const droneTxt = droneOn ? `DRONE:${droneModeName()}` : "DRONE:OFF";
+  const soloTxt = soloTrack >= 0 ? `SOLO:${String(soloTrack + 1).padStart(2, "0")}` : "SOLO:OFF";
+  text(
+    `BPM ${bpm}  ${status}  SEL ${selected + 1}/${NUM_TRACKS} ${vname}  len:${tr.len} ph:${tr.phase}  p:${tr.prob.toFixed(2)} l:${tr.level.toFixed(2)}  ${droneTxt}  ${soloTxt}`,
+    grid.left, grid.top - 18
+  );
+  updateDroneModulation();
+  fill(serialConnected && !sensorTimedOut ? 170 : 125, serialConnected && !sensorTimedOut ? 220 : 150, 165);
+  textSize(10);
+  const serialDelta = sensorDeltaMillivolts > 0 ? `+${sensorDeltaMillivolts}` : String(sensorDeltaMillivolts);
+  text(
+    `SERIAL ${serialStatus}  ${Math.round(sensorMillivolts)}mV  d${serialDelta}  S${serialSampleCount} H${serialSpikeCount}  FLOOR ${serialTriggerFloor}  CENTER ${serialSignalCenter}  SPAN ${serialSignalSpan}  RISE ${serialRiseThreshold}`,
+    grid.left, grid.top - 4
+  );
+
+  // visible rows
+  const rowsVisible = floor(grid.h / grid.rowH);
+  const start = scrollRow;
+  const end = min(NUM_TRACKS, start + rowsVisible);
+
+  for (let t = start; t < end; t++) {
+    const row = t - start;
+    const y = grid.top + row * grid.rowH;
+    const trk = tracks[t];
+    const local = isPlaying ? currentLocalStep(t) : -1;
+
+    // row highlight
+    if (t === selected) {
+      if (millis() < serialFlashUntil) fill(255, 105, 70, 85);
+      else fill(255, 12);
+      noStroke();
+      rect(grid.left, y, grid.w, grid.rowH);
+    }
+
+    // per-track local playhead hint ONLY (no global bar)
+    if (isPlaying && local >= 0) {
+      fill(255, 10);
+      noStroke();
+      rect(grid.left + grid.labelW + local * grid.cellW, y, grid.cellW, grid.rowH);
+    }
+
+    // label
+    fill(trk.enabled ? 255 : 110);
+    noStroke();
+    textSize(12);
+    const label = `${String(t + 1).padStart(2, "0")} ${VOICES[trk.voice].name}`;
+    text(label, grid.left, y + grid.rowH * 0.70);
+
+    // params
+    fill(160);
+    textSize(10);
+    text(
+      `len:${String(trk.len).padStart(2," ")} ph:${String(trk.phase).padStart(2," ")}  p${trk.prob.toFixed(2)} l${trk.level.toFixed(2)}  ${trk.enabled ? "ON" : "OFF"}`,
+      grid.left + 68, y + grid.rowH * 0.70
+    );
+
+    // cells
+    for (let s = 0; s < STEPS; s++) {
+      const x = grid.left + grid.labelW + s * grid.cellW;
+      const activeZone = (s < trk.len);
+      const on = pattern[t][s] === 1;
+
+      stroke(255, activeZone ? 255 : 40);
+      strokeWeight(1);
+
+      const pad = 5;
+      if (on && activeZone) fill(255);
+      else noFill();
+
+      rect(x + pad, y + pad, grid.cellW - pad * 2, grid.rowH - pad * 2);
+    }
+  }
+
+  // footer help
+  fill(150);
+  noStroke();
+  textSize(10);
+  text(
+    `SPACE play • click toggle • wheel scroll • ↑↓ select • Shift+↑↓ tempo • , . length • V voice • X remove • [ ] prob • - = level • R/C random/clear • P poly • D drone • T mode`,
+    grid.left, grid.top + grid.h + 18
+  );
+  text(`U serial • G/Y floor • H/J center • K/L span • N/M rise threshold`, grid.left, grid.top + grid.h + 32);
+  fill(90);
+  text(`(first click/keypress enables audio)`, grid.left, height - 12);
+}
+
+function layoutUI() {
+  const margin = max(16, min(width, height) * 0.06);
+  grid.left = margin;
+  grid.top = margin + grid.headerH;
+  grid.w = width - margin * 2;
+  grid.h = height - grid.top - margin - grid.footerH;
+
+  grid.rowH = 34;
+  grid.cellW = (grid.w - grid.labelW) / STEPS;
+
+  // clamp scroll
+  const rowsVisible = max(1, floor(grid.h / grid.rowH));
+  scrollRow = constrain(scrollRow, 0, max(0, NUM_TRACKS - rowsVisible));
+}
+
+function mouseWheel(e) {
+  scrollRow += (e.deltaY > 0) ? 1 : -1;
+  return false;
+}
+
+function mousePressed() {
+  armAudio();
+
+  if (!insideGrid()) return;
+
+  const { t, s, inLabel } = gridHit(mouseX, mouseY);
+  if (t == null) return;
+
+  if (inLabel) {
+    selected = t;
+    keepSelectedInView();
+    return;
+  }
+
+  // only toggle within track length
+  if (s < tracks[t].len) pattern[t][s] = pattern[t][s] ? 0 : 1;
+}
+
+function keyPressed() {
+  armAudio();
+
+  if (key === " ") togglePlay();
+  if (key === "u" || key === "U") toggleSerialConnection();
+  if (key === "g" || key === "G") serialTriggerFloor = max(0, serialTriggerFloor - 5);
+  if (key === "y" || key === "Y") serialTriggerFloor = min(400, serialTriggerFloor + 5);
+  if (key === "h" || key === "H") serialSignalCenter = max(0, serialSignalCenter - 5);
+  if (key === "j" || key === "J") serialSignalCenter = min(400, serialSignalCenter + 5);
+  if (key === "k" || key === "K") serialSignalSpan = max(5, serialSignalSpan - 5);
+  if (key === "l" || key === "L") serialSignalSpan = min(200, serialSignalSpan + 5);
+  if (key === "n" || key === "N") serialRiseThreshold = max(1, serialRiseThreshold - 1);
+  if (key === "m" || key === "M") serialRiseThreshold = min(100, serialRiseThreshold + 1);
+
+  // select track
+  if (keyCode === UP_ARROW && !keyIsDown(SHIFT)) { selected = max(0, selected - 1); keepSelectedInView(); }
+  if (keyCode === DOWN_ARROW && !keyIsDown(SHIFT)) { selected = min(NUM_TRACKS - 1, selected + 1); keepSelectedInView(); }
+
+  // tempo
+  if (keyCode === UP_ARROW && keyIsDown(SHIFT)) bpm = min(220, bpm + 1);
+  if (keyCode === DOWN_ARROW && keyIsDown(SHIFT)) bpm = max(60, bpm - 1);
+
+  // voice cycle (NEW)
+  if (key === "v" || key === "V") {
+    const dir = keyIsDown(SHIFT) ? -1 : 1;
+    let nv = (tracks[selected].voice + dir) % VOICES.length;
+    if (nv < 0) nv += VOICES.length;
+    tracks[selected].voice = nv;
+  }
+
+  // prob / level
+  if (key === "[") tracks[selected].prob = max(0, tracks[selected].prob - 0.05);
+  if (key === "]") tracks[selected].prob = min(1, tracks[selected].prob + 0.05);
+  if (key === "-") tracks[selected].level = max(0, tracks[selected].level - 0.05);
+  if (key === "=") tracks[selected].level = min(1.2, tracks[selected].level + 0.05);
+
+  // length (polyrhythm)
+  if (key === ",") setLen(selected, tracks[selected].len - 1);
+  if (key === ".") setLen(selected, tracks[selected].len + 1);
+
+  // remove-from-playback
+  if (key === "x" || key === "X") {
+    if (keyIsDown(SHIFT)) { clearTrack(selected); tracks[selected].enabled = false; }
+    else tracks[selected].enabled = !tracks[selected].enabled;
+  }
+
+  // random / clear
+  if (key === "r" || key === "R") {
+    if (keyIsDown(SHIFT)) randomizeAll();
+    else randomizeTrack(selected);
+  }
+  if (key === "c" || key === "C") {
+    if (keyIsDown(SHIFT)) clearAll();
+    else clearTrack(selected);
+  }
+
+  // polyrhythmizer: random length + phase
+  if (key === "p" || key === "P") {
+    if (keyIsDown(SHIFT)) {
+      for (let i = 0; i < NUM_TRACKS; i++) polyize(i);
+    } else polyize(selected);
+  }
+
+  // drone
+  if (key === "d" || key === "D") toggleDrone();
+  if (key === "t" || key === "T") cycleDroneMode();
+  if (key === "s" || key === "S") toggleSoloSelected();
+}
+
+async function toggleSerialConnection() {
+  if (serialPort) {
+    if (serialReader) await serialReader.cancel();
+    return;
+  }
+  if (!navigator.serial) {
+    serialStatus = "NO WEB SERIAL";
+    return;
+  }
+
+  try {
+    serialStatus = "CHOOSE PORT";
+    serialPort = await navigator.serial.requestPort();
+    await serialPort.open({ baudRate: 9600 });
+    serialConnected = true;
+    sensorTimedOut = false;
+    sensorLastReadingAt = Date.now();
+    serialStatus = "CONNECTED";
+    updateSerialPanel();
+
+    sensorWatchdog = setInterval(() => {
+      if (serialConnected && !sensorTimedOut && Date.now() - sensorLastReadingAt > 1000) {
+        handleSerialVoltage(0);
+        sensorTimedOut = true;
+        serialStatus = "NO DATA / ZERO";
+        updateSerialPanel();
+      }
+    }, 250);
+
+    const reader = serialPort.readable.getReader();
+    serialReader = reader;
+    const decoder = new TextDecoder();
+    let pending = "";
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      pending += decoder.decode(value, { stream: true });
+      const lines = pending.split(/\r?\n/);
+      pending = lines.pop();
+      if (pending.length > 128) pending = pending.slice(-128);
+      for (const line of lines) {
+        const reading = parseSerialMillivolts(line);
+        if (reading !== null) handleSerialVoltage(reading);
+      }
+    }
+  } catch (error) {
+    serialStatus = error.name === "NotFoundError" ? "PORT NOT SELECTED" : "SERIAL ERROR";
+    updateSerialPanel();
+  } finally {
+    const wasConnected = serialConnected;
+    if (sensorWatchdog) clearInterval(sensorWatchdog);
+    sensorWatchdog = null;
+    if (serialReader) serialReader.releaseLock();
+    serialReader = null;
+    if (serialPort) {
+      try { await serialPort.close(); } catch (error) {}
+    }
+    serialPort = null;
+    serialConnected = false;
+    if (wasConnected) handleSerialVoltage(0);
+    previousSensorMillivolts = null;
+    serialStatus = "OFFLINE";
+    updateSerialPanel();
+  }
+}
+
+function parseSerialMillivolts(line) {
+  const match = line.trim().match(/-?\d+(?:\.\d+)?/);
+  if (!match) return null;
+  const hasVolts = /\bV\b/i.test(line) && !/mV/i.test(line);
+  const reading = Number(match[0]) * (hasVolts ? 1000 : 1);
+  return Number.isFinite(reading) ? constrain(reading, 0, 400) : null;
+}
+
+function handleSerialVoltage(reading) {
+  const previous = previousSensorMillivolts;
+  sensorMillivolts = reading;
+  sensorDeltaMillivolts = previous === null ? 0 : Math.round(reading - previous);
+  sensorLastReadingAt = Date.now();
+  sensorTimedOut = false;
+  serialSampleCount++;
+  serialGraphHistory.push({ time: performance.now(), value: reading });
+  if (serialGraphHistory.length > 300) serialGraphHistory.shift();
+
+    if (reading > 0 && previous !== null && tracks[selected].enabled &&
+      (soloTrack < 0 || soloTrack === selected) && reading >= serialTriggerFloor &&
+      reading - previous >= serialRiseThreshold && ctx) {
+    const track = tracks[selected];
+    const windowLow = serialSignalCenter - serialSignalSpan * 0.5;
+    const position = constrain((reading - windowLow) / serialSignalSpan, 0, 1);
+    const hitTrack = { ...track, level: track.level * (0.25 + position * 0.75) };
+    const step = Math.round(position * (track.len - 1));
+    VOICES[track.voice].play({ tr: hitTrack, index: selected }, ctx.currentTime + 0.01, step);
+    serialSpikeCount++;
+    serialFlashUntil = millis() + 100;
+  }
+
+  previousSensorMillivolts = reading > 0 ? reading : null;
+  if (serialConnected) serialStatus = "LIVE";
+  updateSerialPanel();
+}
+
+function keepSelectedInView() {
+  const rowsVisible = max(1, floor(grid.h / grid.rowH));
+  if (selected < scrollRow) scrollRow = selected;
+  if (selected >= scrollRow + rowsVisible) scrollRow = selected - rowsVisible + 1;
+}
+
+function insideGrid() {
+  return mouseX >= grid.left && mouseX <= grid.left + grid.w &&
+         mouseY >= grid.top && mouseY <= grid.top + grid.h;
+}
+
+function gridHit(mx, my) {
+  const rowsVisible = floor(grid.h / grid.rowH);
+  const row = floor((my - grid.top) / grid.rowH);
+  const t = scrollRow + row;
+  if (row < 0 || row >= rowsVisible || t < 0 || t >= NUM_TRACKS) return { t: null, s: null, inLabel: false };
+
+  const inLabel = (mx < grid.left + grid.labelW);
+  const s = floor((mx - (grid.left + grid.labelW)) / grid.cellW);
+  return { t, s, inLabel };
+}
+
+// ---------- pattern helpers ----------
+function clearTrack(t) { for (let s = 0; s < STEPS; s++) pattern[t][s] = 0; }
+function clearAll() { for (let t = 0; t < NUM_TRACKS; t++) clearTrack(t); }
+
+function randomizeTrack(t) {
+  // sparse, “pointillist”
+  const density = (t === 0) ? 0.35 : 0.16;
+  for (let s = 0; s < STEPS; s++) {
+    const activeZone = s < tracks[t].len;
+    pattern[t][s] = (activeZone && Math.random() < density) ? 1 : 0;
+  }
+}
+function randomizeAll() { for (let t = 0; t < NUM_TRACKS; t++) randomizeTrack(t); }
+
+function setLen(t, newLen) {
+  tracks[t].len = constrain(newLen, 2, 16);
+  tracks[t].phase = tracks[t].phase % tracks[t].len;
+
+  // clear steps outside new length for clarity
+  for (let s = tracks[t].len; s < STEPS; s++) pattern[t][s] = 0;
+
+  // IMPORTANT: reset THIS track's clock immediately so it becomes a shorter loop NOW
+  if (isPlaying && ctx) resetTrackClock(t);
+}
+
+function polyize(t) {
+  const len = POLY_LENS[(Math.random() * POLY_LENS.length) | 0];
+  tracks[t].len = len;
+  tracks[t].phase = (Math.random() * len) | 0;
+
+  for (let s = 0; s < STEPS; s++) pattern[t][s] = 0;
+  const density = (t === 0) ? 0.35 : 0.14;
+  for (let s = 0; s < len; s++) pattern[t][s] = (Math.random() < density) ? 1 : 0;
+
+  if (isPlaying && ctx) resetTrackClock(t);
+}
+
+// ---------- transport (PER-TRACK clocks) ----------
+function togglePlay() {
+  if (!ctx) return;
+  if (!isPlaying) startTransport();
+  else stopTransport();
+}
+
+function startTransport() {
+  if (!ctx) return;
+  isPlaying = true;
+
+  const start = ctx.currentTime + 0.08;
+  for (let t = 0; t < NUM_TRACKS; t++) {
+    trackTick[t] = 0;
+    trackStartTime[t] = start;
+    trackNextTime[t] = start;
+  }
+
+  if (timer) clearInterval(timer);
+  timer = setInterval(scheduler, lookaheadMs);
+}
+
+function stopTransport() {
+  isPlaying = false;
+  if (timer) clearInterval(timer);
+  timer = null;
+}
+
+// reset only one track clock (used by length changes / polyize)
+function resetTrackClock(t) {
+  const now = ctx.currentTime;
+  const start = now + 0.01; // tiny safety offset
+  trackTick[t] = 0;
+  trackStartTime[t] = start;
+  trackNextTime[t] = start;
+}
+
+function scheduler() {
+  const now = ctx.currentTime;
+  const spb = 60 / bpm;
+  const stepDur = spb / 4; // 16ths (global unit), but each track loops at its own length
+
+  for (let t = 0; t < NUM_TRACKS; t++) {
+    while (trackNextTime[t] < now + scheduleAhead) {
+      scheduleTrackStep(t, trackTick[t], trackNextTime[t]);
+      trackTick[t]++;
+      trackNextTime[t] += stepDur;
+    }
+  }
+}
+
+function scheduleTrackStep(t, tick, time) {
+  const tr = tracks[t];
+
+  // advance clocks even if disabled; just don't trigger sound
+  const local = (tick + tr.phase) % tr.len;
+
+  if (soloTrack >= 0 && t !== soloTrack) return;
+  if (!tr.enabled) return;
+  if (pattern[t][local] !== 1) return;
+  if (Math.random() > tr.prob) return;
+
+  const jitter = (Math.random() * 2 - 1) * 0.0025;
+  const v = VOICES[tr.voice];
+  v.play({ tr, index: t }, time + jitter, local);
+}
+
+// UI playhead per track (approx. “current” step even with scheduleAhead)
+function currentLocalStep(t) {
+  if (!ctx) return -1;
+  const tr = tracks[t];
+  const spb = 60 / bpm;
+  const stepDur = spb / 4;
+
+  // trackTick is "next to schedule"; estimate what's actually happening now
+  const aheadSteps = Math.max(0, Math.floor((trackNextTime[t] - ctx.currentTime) / stepDur));
+  const curTick = Math.max(0, trackTick[t] - aheadSteps - 1);
+
+  return (curTick + tr.phase) % tr.len;
+}
+
+// ---------- audio init ----------
+function armAudio() {
+  if (!ctx) initAudio();
+  if (ctx.state === "suspended") ctx.resume();
+}
+
+function initAudio() {
+  const ACtx = window.AudioContext || window.webkitAudioContext;
+  ctx = new ACtx();
+
+  master = ctx.createGain();
+  master.gain.value = 0.85;
+
+  comp = ctx.createDynamicsCompressor();
+  comp.threshold.value = -18;
+  comp.knee.value = 24;
+  comp.ratio.value = 3.2;
+  comp.attack.value = 0.003;
+  comp.release.value = 0.14;
+
+  // delay (tiny smear)
+  delay = ctx.createDelay(1.0);
+  delay.delayTime.value = 0.11;
+
+  delayFb = ctx.createGain();
+  delayFb.gain.value = 0.22;
+
+  delayLP = ctx.createBiquadFilter();
+  delayLP.type = "lowpass";
+  delayLP.frequency.value = 2400;
+  delayLP.Q.value = 0.25;
+
+  delaySend = ctx.createGain();
+  delaySend.gain.value = 0.18;
+
+  // feedback loop
+  delay.connect(delayLP);
+  delayLP.connect(delayFb);
+  delayFb.connect(delay);
+
+  // route
+  master.connect(comp);
+  comp.connect(ctx.destination);
+
+  // delay return
+  delay.connect(master);
+
+  // send bus -> delay (connect ONCE)
+  delaySend.connect(delay);
+
+  noiseBuffer = makeNoiseBuffer(ctx, 2.0);
+}
+
+function makeNoiseBuffer(audioCtx, seconds) {
+  const length = Math.floor(audioCtx.sampleRate * seconds);
+  const buffer = audioCtx.createBuffer(1, length, audioCtx.sampleRate);
+  const data = buffer.getChannelData(0);
+  for (let i = 0; i < length; i++) data[i] = (Math.random() * 2 - 1) * 0.8;
+  return buffer;
+}
+
+function envGain(time, a, d, peak) {
+  const g = ctx.createGain();
+  g.gain.setValueAtTime(0.0001, time);
+  g.gain.exponentialRampToValueAtTime(max(0.0002, peak), time + a);
+  g.gain.exponentialRampToValueAtTime(0.0001, time + a + d);
+  return g;
+}
+
+function sendToDelay(node, amount = 0.25) {
+  const s = ctx.createGain();
+  s.gain.value = amount;
+  node.connect(s);
+  s.connect(delaySend);
+}
+
+// ---------- voices (clicks / bleeps / noise / metal / subs) ----------
+function vTick(twrap, time, step) {
+  const { tr } = twrap;
+  const osc = ctx.createOscillator();
+  osc.type = "square";
+  const base = 3400 + (step % 8) * 70;
+  osc.frequency.setValueAtTime(base, time);
+
+  const g = envGain(time, 0.001, 0.020, 0.38 * tr.level);
+
+  osc.connect(g);
+  g.connect(master);
+  sendToDelay(g, 0.20);
+
+  osc.start(time);
+  osc.stop(time + 0.04);
+}
+
+function vPin(twrap, time, step) {
+  const { tr } = twrap;
+  const osc = ctx.createOscillator();
+  osc.type = "sine";
+  osc.frequency.setValueAtTime(5200 + (step % 4) * 200, time);
+
+  const g = envGain(time, 0.001, 0.012, 0.22 * tr.level);
+
+  osc.connect(g);
+  g.connect(master);
+
+  osc.start(time);
+  osc.stop(time + 0.03);
+}
+
+function vBlip(twrap, time, step) {
+  const { tr } = twrap;
+  const osc = ctx.createOscillator();
+  osc.type = "sine";
+  const bank = [880, 990, 1180, 1320, 1760, 1980, 2640];
+  const f = bank[(step + ((Math.random() * bank.length) | 0)) % bank.length] * (Math.random() < 0.12 ? 2 : 1);
+  osc.frequency.setValueAtTime(f, time);
+
+  const hp = ctx.createBiquadFilter();
+  hp.type = "highpass";
+  hp.frequency.value = 160;
+
+  const g = envGain(time, 0.003, 0.075, 0.22 * tr.level);
+
+  osc.connect(g);
+  g.connect(hp);
+  hp.connect(master);
+  sendToDelay(hp, 0.30);
+
+  osc.start(time);
+  osc.stop(time + 0.11);
+}
+
+function vChirpFM(twrap, time, step) {
+  const { tr } = twrap;
+  const car = ctx.createOscillator();
+  const mod = ctx.createOscillator();
+  const modGain = ctx.createGain();
+
+  car.type = "sine";
+  mod.type = "sine";
+
+  const cf = 900 + (step % 7) * 110;
+  const mf = 80 + Math.random() * 160;
+
+  car.frequency.setValueAtTime(cf, time);
+  mod.frequency.setValueAtTime(mf, time);
+
+  modGain.gain.setValueAtTime(0, time);
+  modGain.gain.linearRampToValueAtTime(260 + Math.random() * 260, time + 0.02);
+  modGain.gain.linearRampToValueAtTime(0, time + 0.08);
+
+  mod.connect(modGain);
+  modGain.connect(car.frequency);
+
+  const g = envGain(time, 0.002, 0.10, 0.18 * tr.level);
+
+  car.connect(g);
+  g.connect(master);
+  sendToDelay(g, 0.25);
+
+  mod.start(time);
+  car.start(time);
+  mod.stop(time + 0.12);
+  car.stop(time + 0.12);
+}
+
+function vHat(twrap, time, step) {
+  const { tr } = twrap;
+  const src = ctx.createBufferSource();
+  src.buffer = noiseBuffer;
+
+  const hp = ctx.createBiquadFilter();
+  hp.type = "highpass";
+  hp.frequency.setValueAtTime(5200 + Math.random() * 2200, time);
+
+  const g = envGain(time, 0.001, 0.030, 0.24 * tr.level);
+
+  src.connect(hp);
+  hp.connect(g);
+  g.connect(master);
+  sendToDelay(g, 0.20);
+
+  const dur = 0.05;
+  src.start(time, Math.random() * (noiseBuffer.duration - dur), dur);
+  src.stop(time + dur + 0.01);
+}
+
+function vSnare(twrap, time, step) {
+  const { tr } = twrap;
+
+  // noise body
+  const n = ctx.createBufferSource();
+  n.buffer = noiseBuffer;
+
+  const bp = ctx.createBiquadFilter();
+  bp.type = "bandpass";
+  bp.frequency.setValueAtTime(1800 + Math.random() * 1200, time);
+  bp.Q.value = 3.5;
+
+  const gN = envGain(time, 0.002, 0.12, 0.32 * tr.level);
+
+  n.connect(bp);
+  bp.connect(gN);
+
+  // tiny tone snap
+  const osc = ctx.createOscillator();
+  osc.type = "triangle";
+  osc.frequency.setValueAtTime(220 + Math.random() * 40, time);
+
+  const gT = envGain(time, 0.001, 0.06, 0.12 * tr.level);
+
+  osc.connect(gT);
+
+  // mix
+  const mix = ctx.createGain();
+  mix.gain.value = 1.0;
+
+  gN.connect(mix);
+  gT.connect(mix);
+
+  const hp = ctx.createBiquadFilter();
+  hp.type = "highpass";
+  hp.frequency.value = 120;
+
+  mix.connect(hp);
+  hp.connect(master);
+  sendToDelay(hp, 0.20);
+
+  const dur = 0.18;
+  n.start(time, Math.random() * (noiseBuffer.duration - dur), dur);
+  n.stop(time + dur + 0.01);
+
+  osc.start(time);
+  osc.stop(time + 0.10);
+}
+
+function vCrackle(twrap, time, step) {
+  const { tr } = twrap;
+
+  // 3 tiny grains inside one hit
+  for (let i = 0; i < 3; i++) {
+    const dt = i * (0.008 + Math.random() * 0.010);
+    const src = ctx.createBufferSource();
+    src.buffer = noiseBuffer;
+
+    const bp = ctx.createBiquadFilter();
+    bp.type = "bandpass";
+    bp.frequency.setValueAtTime(3500 + Math.random() * 5000, time + dt);
+    bp.Q.value = 18 + Math.random() * 8;
+
+    const g = envGain(time + dt, 0.001, 0.012, 0.16 * tr.level);
+
+    src.connect(bp);
+    bp.connect(g);
+    g.connect(master);
+
+    const dur = 0.02;
+    src.start(time + dt, Math.random() * (noiseBuffer.duration - dur), dur);
+    src.stop(time + dt + dur + 0.01);
+  }
+}
+
+function vMetal(twrap, time, step) {
+  const { tr } = twrap;
+
+  const a = ctx.createOscillator();
+  const b = ctx.createOscillator();
+  a.type = "square";
+  b.type = "sine";
+
+  const f1 = 500 + (step % 8) * 60 + Math.random() * 30;
+  const f2 = 1300 + Math.random() * 800;
+
+  a.frequency.setValueAtTime(f1, time);
+  b.frequency.setValueAtTime(f2, time);
+
+  // ring-ish: multiply by feeding into gain
+  const ring = ctx.createGain();
+  ring.gain.setValueAtTime(0.0, time);
+
+  b.connect(ring.gain);
+  a.connect(ring);
+
+  const bp = ctx.createBiquadFilter();
+  bp.type = "bandpass";
+  bp.frequency.setValueAtTime(1800 + Math.random() * 2600, time);
+  bp.Q.value = 9;
+
+  const g = envGain(time, 0.002, 0.11, 0.26 * tr.level);
+
+  ring.connect(bp);
+  bp.connect(g);
+  g.connect(master);
+  sendToDelay(g, 0.35);
+
+  a.start(time); b.start(time);
+  a.stop(time + 0.15); b.stop(time + 0.15);
+}
+
+function vSub(twrap, time, step) {
+  const { tr } = twrap;
+  const osc = ctx.createOscillator();
+  osc.type = "sine";
+
+  const f = 42 + (step % 4) * 2 + Math.random() * 2;
+  osc.frequency.setValueAtTime(f * 2.0, time);
+  osc.frequency.exponentialRampToValueAtTime(f, time + 0.04);
+
+  const g = envGain(time, 0.004, 0.16, 0.44 * tr.level);
+
+  const lp = ctx.createBiquadFilter();
+  lp.type = "lowpass";
+  lp.frequency.value = 170;
+
+  osc.connect(g);
+  g.connect(lp);
+  lp.connect(master);
+
+  osc.start(time);
+  osc.stop(time + 0.22);
+}
+
+function vBass(twrap, time, step) {
+  const { tr } = twrap;
+
+  const osc = ctx.createOscillator();
+  osc.type = "triangle";
+  const f = 90 + (step % 5) * 6 + Math.random() * 3;
+  osc.frequency.setValueAtTime(f, time);
+
+  const lp = ctx.createBiquadFilter();
+  lp.type = "lowpass";
+  lp.frequency.setValueAtTime(220 + Math.random() * 220, time);
+  lp.Q.value = 0.7;
+
+  const g = envGain(time, 0.004, 0.22, 0.22 * tr.level);
+
+  osc.connect(lp);
+  lp.connect(g);
+  g.connect(master);
+  sendToDelay(g, 0.10);
+
+  osc.start(time);
+  osc.stop(time + 0.28);
+}
+
+function vPulse(twrap, time, step) {
+  const { tr } = twrap;
+  const osc = ctx.createOscillator();
+  osc.type = "square";
+  osc.frequency.setValueAtTime(260 + (step % 7) * 30, time);
+
+  const hp = ctx.createBiquadFilter();
+  hp.type = "highpass";
+  hp.frequency.value = 380;
+
+  const g = envGain(time, 0.001, 0.06, 0.20 * tr.level);
+
+  osc.connect(hp);
+  hp.connect(g);
+  g.connect(master);
+  sendToDelay(g, 0.18);
+
+  osc.start(time);
+  osc.stop(time + 0.10);
+}
+
+function vGrain(twrap, time, step) {
+  const { tr } = twrap;
+
+  const src = ctx.createBufferSource();
+  src.buffer = noiseBuffer;
+
+  // comb-ish: very short delay feedback burst
+  const d = ctx.createDelay(0.05);
+  d.delayTime.setValueAtTime(0.008 + Math.random() * 0.018, time);
+
+  const fb = ctx.createGain();
+  fb.gain.value = 0.35;
+
+  d.connect(fb);
+  fb.connect(d);
+
+  const bp = ctx.createBiquadFilter();
+  bp.type = "bandpass";
+  bp.frequency.setValueAtTime(1200 + Math.random() * 5200, time);
+  bp.Q.value = 10;
+
+  const g = envGain(time, 0.001, 0.08, 0.20 * tr.level);
+
+  src.connect(bp);
+  bp.connect(d);
+  d.connect(g);
+  g.connect(master);
+  sendToDelay(g, 0.25);
+
+  const dur = 0.09;
+  src.start(time, Math.random() * (noiseBuffer.duration - dur), dur);
+  src.stop(time + dur + 0.01);
+}
+
+function vRim(twrap, time, step) {
+  const { tr } = twrap;
+
+  const osc = ctx.createOscillator();
+  osc.type = "triangle";
+  osc.frequency.setValueAtTime(650 + Math.random() * 220, time);
+
+  const bp = ctx.createBiquadFilter();
+  bp.type = "bandpass";
+  bp.frequency.setValueAtTime(2200 + Math.random() * 900, time);
+  bp.Q.value = 14;
+
+  const g = envGain(time, 0.001, 0.035, 0.22 * tr.level);
+
+  osc.connect(bp);
+  bp.connect(g);
+  g.connect(master);
+
+  osc.start(time);
+  osc.stop(time + 0.06);
+}
+
+function vClap(twrap, time, step) {
+  const { tr } = twrap;
+
+  // multi-tap noise envelope: 3 quick bursts
+  const taps = [0.0, 0.014, 0.030];
+  for (let i = 0; i < taps.length; i++) {
+    const dt = taps[i];
+    const src = ctx.createBufferSource();
+    src.buffer = noiseBuffer;
+
+    const bp = ctx.createBiquadFilter();
+    bp.type = "bandpass";
+    bp.frequency.setValueAtTime(1800 + Math.random() * 1600, time + dt);
+    bp.Q.value = 6;
+
+    const g = envGain(time + dt, 0.001, 0.05 + i * 0.02, (0.18 + i * 0.04) * tr.level);
+
+    src.connect(bp);
+    bp.connect(g);
+    g.connect(master);
+    sendToDelay(g, 0.12);
+
+    const dur = 0.10;
+    src.start(time + dt, Math.random() * (noiseBuffer.duration - dur), dur);
+    src.stop(time + dt + dur + 0.01);
+  }
+}
+
+function vZap(twrap, time, step) {
+  const { tr } = twrap;
+
+  const osc = ctx.createOscillator();
+  osc.type = "sawtooth";
+  const f0 = 2200 + Math.random() * 2000;
+  const f1 = 280 + Math.random() * 220;
+
+  osc.frequency.setValueAtTime(f0, time);
+  osc.frequency.exponentialRampToValueAtTime(f1, time + 0.09);
+
+  const hp = ctx.createBiquadFilter();
+  hp.type = "highpass";
+  hp.frequency.value = 200;
+
+  const g = envGain(time, 0.001, 0.12, 0.18 * tr.level);
+
+  osc.connect(hp);
+  hp.connect(g);
+  g.connect(master);
+  sendToDelay(g, 0.30);
+
+  osc.start(time);
+  osc.stop(time + 0.13);
+}
+
+function vBoom(twrap, time, step) {
+  const { tr } = twrap;
+
+  const osc = ctx.createOscillator();
+  osc.type = "sine";
+  const f = 38 + Math.random() * 6;
+  osc.frequency.setValueAtTime(f * 1.8, time);
+  osc.frequency.exponentialRampToValueAtTime(f, time + 0.07);
+
+  const g = envGain(time, 0.004, 0.40, 0.34 * tr.level);
+
+  // tiny air-noise tail
+  const src = ctx.createBufferSource();
+  src.buffer = noiseBuffer;
+
+  const hp = ctx.createBiquadFilter();
+  hp.type = "highpass";
+  hp.frequency.value = 900;
+
+  const gN = envGain(time, 0.002, 0.12, 0.06 * tr.level);
+
+  osc.connect(g);
+  g.connect(master);
+
+  src.connect(hp);
+  hp.connect(gN);
+  gN.connect(master);
+
+  sendToDelay(g, 0.12);
+
+  osc.start(time);
+  osc.stop(time + 0.48);
+
+  const dur = 0.18;
+  src.start(time, Math.random() * (noiseBuffer.duration - dur), dur);
+  src.stop(time + dur + 0.01);
+}
+
+// ---------- NEW: DEEP bass ----------
+function makeSaturatorCurve(amount = 0.9) {
+  const n = 2048;
+  const curve = new Float32Array(n);
+  const k = amount * 3.0;
+  const norm = Math.tanh(k);
+  for (let i = 0; i < n; i++) {
+    const x = (i / (n - 1)) * 2 - 1;
+    curve[i] = Math.tanh(k * x) / (norm || 1);
+  }
+  return curve;
+}
+
+function vDeepBass(twrap, time, step) {
+  const { tr } = twrap;
+
+  // low note set (keeps it “bassline-ish” but deep)
+  const notes = [32.7, 36.7, 41.2, 49.0, 55.0]; // ~C1, D1, E1, G1, A1-ish
+  const f = notes[step % notes.length] * (Math.random() < 0.12 ? 0.5 : 1.0);
+
+  // main + sub
+  const o1 = ctx.createOscillator();
+  const o2 = ctx.createOscillator();
+  o1.type = "sine";
+  o2.type = "triangle";
+
+  // 808-ish pitch drop
+  o1.frequency.setValueAtTime(f * 2.2, time);
+  o1.frequency.exponentialRampToValueAtTime(f, time + 0.10);
+  o2.frequency.setValueAtTime(f * 2.2, time);
+  o2.frequency.exponentialRampToValueAtTime(f, time + 0.10);
+
+  const pre = ctx.createGain();
+  pre.gain.value = 1.0;
+
+  const lp = ctx.createBiquadFilter();
+  lp.type = "lowpass";
+  lp.frequency.setValueAtTime(140 + Math.random() * 60, time);
+  lp.Q.value = 0.85;
+
+  const sat = ctx.createWaveShaper();
+  sat.curve = makeSaturatorCurve(0.95);
+  sat.oversample = "4x";
+
+  // longer, weighty envelope
+  const g = envGain(time, 0.006, 0.65, 0.75 * tr.level);
+
+  o1.connect(pre);
+  o2.connect(pre);
+  pre.connect(lp);
+  lp.connect(sat);
+  sat.connect(g);
+  g.connect(master);
+
+  // keep delay send tiny (avoid mud)
+  sendToDelay(g, 0.05);
+
+  const stopT = time + 0.95;
+  o1.start(time); o2.start(time);
+  o1.stop(stopT); o2.stop(stopT);
+}
+
+// ---------- drone ----------
+function toggleDrone() {
+  if (!ctx) return;
+  droneOn = !droneOn;
+  if (droneOn) startDrone();
+  else stopDrone();
+  updateDroneButton();
+}
+
+function cycleDroneMode() {
+  droneMode = (droneMode + 1) % 3;
+  if (droneOn) { stopDrone(); startDrone(); }
+}
+
+function droneModeName() {
+  return ["SINE", "CLSTR", "AIR"][droneMode];
+}
+
+function updateDroneModulation() {
+  const active = serialConnected && !sensorTimedOut && sensorMillivolts > 0;
+  const halfSpan = Math.max(2.5, serialSignalSpan * 0.5);
+  const target = active ? constrain((sensorMillivolts - serialSignalCenter) / halfSpan, -1, 1) : 0;
+  droneModulation += (target - droneModulation) * 0.025;
+  if (droneModNode) droneModNode.textContent = `${Math.round(droneModulation * 100)}%`;
+  if (!droneOn || !ctx || !drone.amp) return;
+
+  const now = ctx.currentTime;
+  const depth = Number(droneDepthControl.value) / 100;
+  const pitchFactor = Math.pow(2, droneModulation * depth * 0.18);
+  for (let i = 0; i < drone.osc.length; i++) {
+    const oscillator = drone.osc[i];
+    if (oscillator.frequency && droneBaseFrequencies[i]) {
+      oscillator.frequency.setTargetAtTime(droneBaseFrequencies[i] * pitchFactor, now, 0.14);
+    }
+  }
+  if (drone.filt) {
+    const filterFactor = Math.pow(2, droneModulation * depth * 0.7);
+    drone.filt.frequency.setTargetAtTime(droneBaseFilterFrequency * filterFactor, now, 0.18);
+  }
+  drone.amp.gain.setTargetAtTime(0.06 + Math.abs(droneModulation) * depth * 0.025, now, 0.2);
+  if (drone.lfoGain) {
+    drone.lfoGain.gain.setTargetAtTime(0.015 + Math.abs(droneModulation) * depth * 0.04, now, 0.2);
+  }
+}
+
+function startDrone() {
+  stopDrone();
+  droneBaseFrequencies = [];
+
+  const amp = ctx.createGain();
+  amp.gain.value = 0.0001;
+
+  const filt = ctx.createBiquadFilter();
+  filt.type = "bandpass";
+  filt.frequency.value = 210;
+  filt.Q.value = 0.8;
+  droneBaseFilterFrequency = filt.frequency.value;
+
+  // slow amp motion
+  const lfo = ctx.createOscillator();
+  const lfoGain = ctx.createGain();
+  lfo.type = "sine";
+  lfo.frequency.value = 0.055;
+  lfoGain.gain.value = 0.12;
+
+  lfo.connect(lfoGain);
+  lfoGain.connect(amp.gain);
+
+  const now = ctx.currentTime;
+  amp.gain.setValueAtTime(0.0001, now);
+  amp.gain.exponentialRampToValueAtTime(0.08, now + 0.35);
+
+  // build modes
+  if (droneMode === 0) {
+    const a = ctx.createOscillator();
+    const b = ctx.createOscillator();
+    a.type = "sine";
+    b.type = "triangle";
+    droneBaseFrequencies = [55, 110];
+    a.frequency.value = droneBaseFrequencies[0];
+    b.frequency.value = droneBaseFrequencies[1];
+
+    a.connect(filt);
+    b.connect(filt);
+    drone.osc = [a, b];
+
+    a.start(now); b.start(now);
+  } else if (droneMode === 1) {
+    const freqs = [55, 55 * 2, 55 * 3, 55 * 5];
+    droneBaseFrequencies = freqs;
+    drone.osc = freqs.map((f, i) => {
+      const o = ctx.createOscillator();
+      o.type = i % 2 ? "triangle" : "sine";
+      o.frequency.value = f * (1 + (Math.random() * 0.002));
+      o.connect(filt);
+      o.start(now);
+      return o;
+    });
+  } else {
+    droneBaseFilterFrequency = 520;
+    filt.frequency.value = droneBaseFilterFrequency;
+    const src = ctx.createBufferSource();
+    src.buffer = noiseBuffer;
+    src.loop = true;
+
+    const hp = ctx.createBiquadFilter();
+    hp.type = "highpass";
+    hp.frequency.value = 1800;
+
+    src.connect(hp);
+    hp.connect(filt);
+
+    drone.osc = [src];
+    src.start(now);
+  }
+
+  filt.connect(amp);
+  amp.connect(master);
+  sendToDelay(amp, 0.30);
+
+  lfo.start(now);
+
+  drone.amp = amp;
+  drone.filt = filt;
+  drone.lfo = lfo;
+  drone.lfoGain = lfoGain;
+}
+
+function stopDrone() {
+  if (!ctx) return;
+  const now = ctx.currentTime;
+
+  if (drone.amp) {
+    drone.amp.gain.setValueAtTime(Math.max(0.0001, drone.amp.gain.value), now);
+    drone.amp.gain.exponentialRampToValueAtTime(0.0001, now + 0.25);
+  }
+
+  for (const o of (drone.osc || [])) {
+    try { o.stop(now + 0.3); } catch (e) {}
+  }
+  if (drone.lfo) {
+    try { drone.lfo.stop(now + 0.3); } catch (e) {}
+  }
+
+  drone.osc = [];
+  drone.amp = null;
+  drone.filt = null;
+  drone.lfo = null;
+  drone.lfoGain = null;
+}
+</script>
+</body>
+</html>
