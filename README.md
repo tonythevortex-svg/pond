@@ -61,10 +61,6 @@ This is a **spatially triggered slideshow**, not yet a true simultaneous multi-i
 
 **The code for this prototype was generated with the assistance of OpenAI's ChatGPT through an iterative process of prompting, testing, feedback and revision.** The artistic concept, research direction, interaction requirements and design decisions were developed and directed by the project creator. The code is shared as an experimental, AI-assisted creative coding study, rather than as a finished software product.
 
-## Publishing on GitHub
-
-Add this file as **`README.md`** at the root of the repository alongside `pond_iteration_03_images.html` and `sketch_images.js`. For a browser demo using GitHub Pages, publish the standalone HTML file as `index.html` (or link directly to its filename).
-
 ## License
 
 No license has been specified. Add a `LICENSE` file if you want to define how others may use or adapt the code.
